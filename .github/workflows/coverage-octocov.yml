@@ -35,6 +35,41 @@ jobs:
           name: ${{ inputs.artifact_name }}
           path: .
 
+      - name: Normalize coverage file paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r p; do
+            if [[ -z "${p}" ]]; then
+              continue
+            fi
+
+            if [[ -f "${p}" ]]; then
+              continue
+            fi
+
+            base="$(basename "${p}")"
+            found=""
+
+            if [[ -f "${base}" ]]; then
+              found="${base}"
+            else
+              found="$(find . -type f -name "${base}" -print -quit || true)"
+              found="${found#./}"
+            fi
+
+            if [[ -z "${found}" || ! -f "${found}" ]]; then
+              echo "Coverage file not found for expected path: ${p} (looked for ${base})" >&2
+              exit 1
+            fi
+
+            mkdir -p "$(dirname "${p}")"
+            cp "${found}" "${p}"
+          done <<'EOF'
+          ${{ inputs.coverage_paths }}
+          EOF
+
       - name: Generate octocov config
         shell: bash
         run: |
