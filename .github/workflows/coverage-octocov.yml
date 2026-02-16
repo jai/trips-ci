@@ -1,0 +1,90 @@
+name: Coverage (octocov)
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        description: Name of the uploaded GitHub Actions artifact containing coverage files.
+        required: false
+        type: string
+        default: coverage
+      coverage_paths:
+        description: Newline-delimited list of coverage file paths (relative to repo root).
+        required: true
+        type: string
+      coverage_floor:
+        description: Coverage floor percent (ratchet floor; only enforced once default branch meets it).
+        required: false
+        type: number
+        default: 80
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+
+jobs:
+  octocov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .
+
+      - name: Generate octocov config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > .octocov.yml <<'YAML'
+          coverage:
+            paths:
+          YAML
+
+          # Convert newline-delimited paths into YAML list items.
+          while IFS= read -r p; do
+            if [[ -z "${p}" ]]; then
+              continue
+            fi
+            printf '    - %s\n' "${p}" >> .octocov.yml
+          done <<'EOF'
+          ${{ inputs.coverage_paths }}
+          EOF
+
+          cat >> .octocov.yml <<'YAML'
+            # Ratchet: before we hit the floor, coverage cannot go down; once we hit the floor, it must stay >= floor.
+            acceptable: diff >= 0% && (prev < ${{ inputs.coverage_floor }}% || current >= ${{ inputs.coverage_floor }}%)
+
+          diff:
+            datastores:
+              - artifact://${GITHUB_REPOSITORY}
+
+          report:
+            if: is_default_branch
+            datastores:
+              - artifact://${GITHUB_REPOSITORY}
+
+          summary:
+            if: true
+
+          comment:
+            if: is_pull_request
+            deletePrevious: true
+            hideFooterLink: true
+            message: |
+              ### 📊 Coverage Gate
+
+              ✅ **Green check**: coverage gate passed.
+              ❌ **Red X**: coverage gate failed; add tests or revert coverage-reducing changes.
+
+              **Policy (ratchet)**
+              - 🧱 If `main` is **< ${{ inputs.coverage_floor }}%**: coverage diff must be **>= 0%**
+              - 🎯 If `main` is **>= ${{ inputs.coverage_floor }}%**: PR coverage must be **>= ${{ inputs.coverage_floor }}%**
+          YAML
+
+      - name: Run octocov (coverage reporting/enforcement)
+        uses: k1LoW/octocov-action@v1
