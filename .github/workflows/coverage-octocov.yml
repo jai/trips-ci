@@ -123,3 +123,5 @@ jobs:
 
       - name: Run octocov (coverage reporting/enforcement)
         uses: k1LoW/octocov-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
