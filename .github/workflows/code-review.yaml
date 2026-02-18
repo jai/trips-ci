@@ -299,6 +299,8 @@ jobs:
             - Tests pass (if applicable)
 
             To approve, run: gh pr review --approve --body 'LGTM - Code review passed. [brief summary of what was reviewed]'
+            After approving, enable auto-merge with:
+            gh pr merge --auto --repo ${{ github.repository }} ${{ steps.extract-pr.outputs.pr_number }}
 
             **REQUEST CHANGES** if ANY blocking issues are found:
             - Security vulnerabilities
@@ -313,6 +315,12 @@ jobs:
             - Questions that need clarification before deciding
 
             IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes.
+
+            ## Review Thread Resolution (required)
+            - Before finalizing, inspect all open review threads on this PR.
+            - Resolve every thread whose underlying issue is fully addressed (use GitHub CLI/API as needed).
+            - If any thread cannot be resolved yet, explain exactly why in a PR comment and keep it unresolved.
+            - Do NOT set READY_FOR_REVIEW=true while unresolved actionable review threads remain.
 
             ## Structured Decision Marker (required)
             At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
@@ -606,6 +614,18 @@ jobs:
           HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
           HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
+
+          UNRESOLVED_THREADS=$(gh api graphql \
+            -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner:$owner, name:$repo) { pullRequest(number:$number) { reviewThreads(first:100) { nodes { isResolved } } } } }' \
+            -F owner='${{ github.repository_owner }}' \
+            -F repo='${{ github.event.repository.name }}' \
+            -F number="$PR_NUMBER" \
+            | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length')
+
+          if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
+            echo "::error::READY_FOR_REVIEW=true but PR #${PR_NUMBER} still has ${UNRESOLVED_THREADS} unresolved review threads."
+            exit 1
+          fi
 
           if [[ "$IS_DRAFT" == "true" ]]; then
             gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
