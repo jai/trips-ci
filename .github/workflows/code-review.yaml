@@ -274,16 +274,17 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           REQUESTED_REVIEWER: ${{ github.event.requested_reviewer.login || '' }}
+          SLASH_COMMAND: ${{ steps.extract-comment.outputs.slash_command || '' }}
         shell: bash
         run: |
           MODE="standard_review"
 
-          if [[ "$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "review_requested" && "$REQUESTED_REVIEWER" == "jai" ]]; then
+          if [[ ("$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "review_requested" && "$REQUESTED_REVIEWER" == "jai") || ("$EVENT_NAME" == "issue_comment" && "$SLASH_COMMAND" == "review") ]]; then
             MODE="copilot_handoff"
             REVIEW_INSTRUCTIONS="Perform a comprehensive review, then delegate concrete fixes to @copilot.
 
             ## Copilot Handoff Mode
-            - This run was triggered by pull_request/review_requested for reviewer @jai.
+            - This run was triggered by either /review or pull_request/review_requested for reviewer @jai.
             - Post exactly ONE PR comment addressed to @copilot with a clear, actionable list of required code changes.
             - Include file paths, expected behavior, and acceptance criteria for each requested change.
             - Keep the comment implementation-focused so Copilot can push commits directly.
