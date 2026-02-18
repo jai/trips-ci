@@ -73,7 +73,6 @@ jobs:
           - Suggested fixes and follow-up actions (including `@copilot` delegation)
           - Test and documentation checks
 
-          _Note: Only users with write, maintain, or admin permissions can trigger runs._
           EOF
           )"
         # yamllint enable rule:line-length
@@ -96,24 +95,7 @@ jobs:
       ) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
     steps:
-      # Check if the actor has write or admin permissions on the repository
-      - name: Check actor permissions
-        id: check-permissions
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission \
-            --jq .permission 2>/dev/null || echo "none")
-          echo "Actor (${{ github.actor }}) has '${PERMISSION}' permission on this repository."
-          if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "maintain" || "$PERMISSION" == "write" ]]; then
-            echo "is_authorized=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_authorized=false" >> $GITHUB_OUTPUT
-            echo "::error::Actor does not have write, maintain, or admin permissions on this repository"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.check-permissions.outputs.is_authorized == 'true'
         with:
           fetch-depth: 0
           token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
@@ -121,7 +103,6 @@ jobs:
       # Extract PR number based on event type
       - name: Extract PR number
         id: extract-pr
-        if: steps.check-permissions.outputs.is_authorized == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -159,7 +140,7 @@ jobs:
       # Extract comment details based on event type
       - name: Extract comment details
         id: extract-comment
-        if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -269,7 +250,7 @@ jobs:
       # Define review instructions
       - name: Define review instructions
         id: review-instructions
-        if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        if: steps.extract-pr.outputs.has_pr == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
@@ -375,7 +356,7 @@ jobs:
       # Craft the prompt based on comment type
       - name: Craft prompt for Claude
         id: craft-prompt
-        if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -492,7 +473,7 @@ jobs:
       # Determine if track_progress is supported for this event/action combination
       - name: Check track_progress support
         id: check-track-progress
-        if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -521,7 +502,6 @@ jobs:
       - name: Capture review start timestamp
         id: review-started-at
         if: |
-          steps.check-permissions.outputs.is_authorized == 'true' &&
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.review-instructions.outputs.mode == 'standard_review' &&
           steps.craft-prompt.outputs.decision_required == 'true'
@@ -532,7 +512,7 @@ jobs:
 
       - name: Run Claude review
         uses: anthropics/claude-code-action@v1
-        if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        if: steps.extract-pr.outputs.has_pr == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
@@ -560,7 +540,6 @@ jobs:
       - name: Parse structured ready decision
         id: parse-ready-decision
         if: |
-          steps.check-permissions.outputs.is_authorized == 'true' &&
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.review-instructions.outputs.mode == 'standard_review' &&
           steps.craft-prompt.outputs.decision_required == 'true'
