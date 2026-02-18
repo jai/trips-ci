@@ -58,11 +58,10 @@ jobs:
           gh pr comment ${{ github.event.pull_request.number }} --body "$(cat <<'EOF'
           🤖 **Claude PR Assistant**
 
-          Welcome! This PR has access to AI-powered assistant support using **Claude Opus 4.5**.
+          Welcome! This PR has access to AI-powered assistant support using **Claude Opus**.
 
           **How to trigger:**
           - 🚀 Open/reopen PRs (including draft PRs)
-          - 🔔 Request review from `jai` (triggers assistant run)
           - 🧭 Comment `/review` (optionally add extra instructions after it)
           - 💬 Tag `@claude` in any comment
           - 📝 Reply to inline code comments with `@claude`
@@ -70,7 +69,7 @@ jobs:
           **What I can help with:**
           - Comprehensive review feedback (security, performance, best practices)
           - Specific technical Q&A
-          - Suggested fixes and follow-up actions (including `@copilot` delegation)
+          - Direct code fixes on this PR when safe and appropriate
           - Test and documentation checks
 
           EOF
@@ -251,41 +250,9 @@ jobs:
       - name: Define review instructions
         id: review-instructions
         if: steps.extract-pr.outputs.has_pr == 'true'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          REQUESTED_REVIEWER: ${{ github.event.requested_reviewer.login || '' }}
-          SLASH_COMMAND: ${{ steps.extract-comment.outputs.slash_command || '' }}
         shell: bash
         run: |
-          MODE="standard_review"
-
-          if [[ ("$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "review_requested" && "$REQUESTED_REVIEWER" == "jai") || ("$EVENT_NAME" == "issue_comment" && "$SLASH_COMMAND" == "review") ]]; then
-            MODE="copilot_handoff"
-            REVIEW_INSTRUCTIONS="Perform a comprehensive review, then delegate concrete fixes to @copilot.
-
-            ## Copilot Handoff Mode
-            - This run was triggered by either /review or pull_request/review_requested for reviewer @jai.
-            - Use the same review quality bar and decision policy as standard review mode.
-            - Make an explicit final review decision (APPROVE, REQUEST_CHANGES, or COMMENT).
-            - Treat code sanity, cleanup, and maintainability as first-class review concerns.
-            - If maintainability/cleanup issues are reasonably fixable in this PR, request that work now in this same PR.
-            - If your decision is not APPROVE, post exactly ONE PR comment addressed to @copilot with required fixes.
-            - The @copilot comment must include file paths, expected behavior, and acceptance criteria.
-            - Explicitly require @copilot to push commits to this existing PR branch (no sub-PRs).
-            - If direct push is impossible, require @copilot to post the exact constraint in this PR thread and stop.
-            - Do NOT push commits yourself in this mode.
-
-            ## Structured Decision Marker (required)
-            At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
-            <!-- CLAUDE_READY_DECISION -->
-            READY_FOR_REVIEW=true|false
-            <!-- /CLAUDE_READY_DECISION -->
-
-            Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
-            Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes."
-          else
-            REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
+          REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
 
             1. **Code Quality**
                - Clean code principles and best practices
@@ -311,6 +278,11 @@ jobs:
                - Ensure code is properly documented
                - Verify README updates for new features
                - Check API documentation accuracy
+
+            ## Direct Fixes
+            - If issues are straightforward and safe to fix, implement them directly in this PR and push commits.
+            - Resolve review threads when the underlying issue is fully addressed.
+            - If an issue is not fixed, leave the thread unresolved and explain why in a PR comment.
 
             Use inline comments ONLY for issues that need to be fixed or changed.
             Do NOT leave inline comments for praise or positive observations.
@@ -350,15 +322,13 @@ jobs:
 
             Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
             Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes."
-          fi
 
           # Output the review instructions for use in next step
-          echo "mode=$MODE" >> $GITHUB_OUTPUT
           echo "instructions<<EOF" >> $GITHUB_OUTPUT
           echo "$REVIEW_INSTRUCTIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          echo "✅ Review instructions defined (mode=${MODE})"
+          echo "✅ Review instructions defined (claude-direct)"
 
       # yamllint disable rule:line-length
       # Craft the prompt based on comment type
@@ -459,13 +429,11 @@ jobs:
             fi
 
           else
-            # Pull request event - review behavior can vary by mode
+            # Pull request event - full review
             DECISION_REQUIRED="true"
             FULL_PROMPT="${BASE_CONTEXT}
 
           This PR event was triggered by action: ${{ github.event.action }}.
-          Review mode: ${{ steps.review-instructions.outputs.mode }}.
-
           ${REVIEW_INSTRUCTIONS}"
           fi
 
