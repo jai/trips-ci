@@ -540,52 +540,6 @@ jobs:
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
 
-      - name: Trigger CI for Copilot handoff when checks are blocked
-        if: |
-          steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.review-instructions.outputs.mode == 'copilot_handoff'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
-          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
-          HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
-          HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
-          HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
-
-          if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
-            echo "::notice::PR #${PR_NUMBER} head repo is ${HEAD_REPO}; skipping empty commit because branch is not local to target repo."
-            exit 0
-          fi
-
-          CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
-          TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
-          ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
-
-          if [[ "$ACTION_REQUIRED_CHECKS" -eq 0 ]]; then
-            echo "::notice::PR #${PR_NUMBER} has no action_required checks (total checks: ${TOTAL_CHECKS}). Skipping empty commit."
-            exit 0
-          fi
-
-          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
-            | jq -r '[.[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
-
-          if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
-            echo "::notice::PR #${PR_NUMBER} already has a CI trigger empty commit. Skipping additional empty commit."
-            exit 0
-          fi
-
-          echo "ℹ️ PR #${PR_NUMBER} has action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
-
-          git config user.name "Claude PR Assistant"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin "$HEAD_REF"
-          git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after copilot handoff"
-          git push origin "HEAD:$HEAD_REF"
-
       - name: Parse structured ready decision
         id: parse-ready-decision
         if: |
@@ -665,10 +619,20 @@ jobs:
               ;;
           esac
 
-      - name: Mark draft PR ready and trigger CI if checks are blocked
+      - name: Post-review automation (ready + CI trigger)
         if: |
-          steps.parse-ready-decision.outputs.found == 'true' &&
-          steps.parse-ready-decision.outputs.ready == 'true'
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          (
+            steps.review-instructions.outputs.mode == 'copilot_handoff' ||
+            (
+              steps.parse-ready-decision.outputs.found == 'true' &&
+              steps.parse-ready-decision.outputs.ready == 'true'
+            )
+          )
+        env:
+          MODE: ${{ steps.review-instructions.outputs.mode }}
+          READY_FOUND: ${{ steps.parse-ready-decision.outputs.found || '' }}
+          READY_VALUE: ${{ steps.parse-ready-decision.outputs.ready || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -681,10 +645,15 @@ jobs:
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
           HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
 
-          if [[ "$IS_DRAFT" == "true" ]]; then
-            gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
-          else
-            echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping draft transition."
+          COMMIT_REASON="copilot handoff"
+          if [[ "$MODE" == "standard_review" && "$READY_FOUND" == "true" && "$READY_VALUE" == "true" ]]; then
+            COMMIT_REASON="claude ready decision"
+
+            if [[ "$IS_DRAFT" == "true" ]]; then
+              gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
+            else
+              echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping draft transition."
+            fi
           fi
 
           if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
@@ -716,5 +685,5 @@ jobs:
 
           git fetch origin "$HEAD_REF"
           git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after claude ready decision"
+          git commit --allow-empty -m "ci: trigger checks after ${COMMIT_REASON}"
           git push origin "HEAD:$HEAD_REF"
