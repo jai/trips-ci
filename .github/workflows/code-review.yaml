@@ -280,10 +280,20 @@ jobs:
                - Verify README updates for new features
                - Check API documentation accuracy
 
-            ## Direct Fixes
-            - If issues are straightforward and safe to fix, implement them directly in this PR and push commits.
+            ## Direct Fixes (MANDATORY)
+            - Primary objective: get this PR to merge-ready in this run.
+            - For every blocking issue you find, you MUST implement the fix directly on this PR branch and push commit(s).
+            - Iterate review -> fix -> verify until no blocking issues remain.
+            - Do NOT delegate fixes to Copilot or ask another agent to implement them.
             - Resolve review threads when the underlying issue is fully addressed.
-            - If an issue is not fixed, leave the thread unresolved and explain why in a PR comment.
+            - If any issue is not fixed, keep the related thread unresolved and explain exactly why in a PR comment.
+            - You may use REQUEST_CHANGES only when hard-blocked by an external constraint you cannot resolve in-workflow.
+              Hard-block examples:
+              - no permission/policy to push to the PR branch
+              - unresolved merge conflict/rebase that cannot be completed in this workflow
+              - required secret or external system unavailable
+              - missing product/owner decision required to proceed
+            - When hard-blocked, post one explicit "BLOCKED:" summary comment with the exact blocker and exact next action.
 
             Use inline comments ONLY for issues that need to be fixed or changed.
             Do NOT leave inline comments for praise or positive observations.
@@ -303,17 +313,16 @@ jobs:
             After approving, enable auto-merge with:
             gh pr merge --auto --repo ${{ github.repository }} ${{ steps.extract-pr.outputs.pr_number }}
 
-            **REQUEST CHANGES** if ANY blocking issues are found:
-            - Security vulnerabilities
-            - Critical bugs
-            - Missing required tests for new functionality
-            - Breaking changes without migration path
+            **REQUEST CHANGES** only if hard-blocked after attempting direct fixes:
+            - You cannot push required changes from this workflow
+            - You cannot safely resolve merge conflicts/rebase in this workflow
+            - A required external dependency is unavailable
+            - Human product/owner decision is required before implementation
 
-            To request changes, run: gh pr review --request-changes --body '[summary of required changes]'
+            To request changes, run:
+            gh pr review --request-changes --body 'BLOCKED: [exact blocker]. Next action: [specific next step].'
 
-            **COMMENT only** (no approval/rejection) if:
-            - Minor suggestions that don't block merge
-            - Questions that need clarification before deciding
+            **COMMENT only** (no approval/rejection) only for direct Q&A interactions that are not full-review requests.
 
             IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes.
 
