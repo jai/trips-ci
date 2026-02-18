@@ -537,6 +537,34 @@ jobs:
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
 
+      - name: Trigger CI after Copilot review request
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.review-instructions.outputs.mode == 'copilot_handoff' &&
+          github.event_name == 'pull_request' &&
+          github.event.action == 'review_requested'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
+          HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
+          HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
+
+          if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
+            echo "::notice::PR #${PR_NUMBER} head repo is ${HEAD_REPO}; skipping empty commit because branch is not local to target repo."
+            exit 0
+          fi
+
+          git config user.name "Claude PR Assistant"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "$HEAD_REF"
+          git switch -C "$HEAD_REF" "origin/$HEAD_REF"
+          git commit --allow-empty -m "ci: trigger checks after copilot review request"
+          git push origin "HEAD:$HEAD_REF"
+
       - name: Parse structured ready decision
         id: parse-ready-decision
         if: |
