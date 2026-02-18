@@ -266,19 +266,24 @@ jobs:
 
             ## Copilot Handoff Mode
             - This run was triggered by either /review or pull_request/review_requested for reviewer @jai.
-            - Post exactly ONE PR comment addressed to @copilot with a clear, actionable list of required code changes.
-            - Include file paths, expected behavior, and acceptance criteria for each requested change.
-            - Keep the comment implementation-focused so Copilot can push commits directly.
-            - Explicitly instruct @copilot to push commits to this existing PR branch (update this PR directly).
-            - Do NOT ask @copilot to open a new PR/sub-PR for these fixes.
-            - If direct push is impossible, require @copilot to post the exact constraint in this PR thread and stop (no fallback PR creation).
-            - Treat code sanity, cleanup, and maintainability as first-class review concerns, not optional nice-to-haves.
-            - If maintainability/cleanup issues are reasonably fixable in this PR, explicitly instruct @copilot to implement them now in this same PR.
-            - Do not defer cleanup to future PRs unless the change is truly out of scope or too risky; if deferred, state why.
-            - Prioritize instructions as: (1) correctness/security, (2) reliability/tests, (3) maintainability/cleanup.
-            - Do NOT approve or request changes in this mode.
+            - Use the same review quality bar and decision policy as standard review mode.
+            - Make an explicit final review decision (APPROVE, REQUEST_CHANGES, or COMMENT).
+            - Treat code sanity, cleanup, and maintainability as first-class review concerns.
+            - If maintainability/cleanup issues are reasonably fixable in this PR, request that work now in this same PR.
+            - If your decision is not APPROVE, post exactly ONE PR comment addressed to @copilot with required fixes.
+            - The @copilot comment must include file paths, expected behavior, and acceptance criteria.
+            - Explicitly require @copilot to push commits to this existing PR branch (no sub-PRs).
+            - If direct push is impossible, require @copilot to post the exact constraint in this PR thread and stop.
             - Do NOT push commits yourself in this mode.
-            - After posting the @copilot instruction comment, stop."
+
+            ## Structured Decision Marker (required)
+            At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
+            <!-- CLAUDE_READY_DECISION -->
+            READY_FOR_REVIEW=true|false
+            <!-- /CLAUDE_READY_DECISION -->
+
+            Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
+            Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes."
           else
             REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
 
@@ -506,7 +511,6 @@ jobs:
         id: review-started-at
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.review-instructions.outputs.mode == 'standard_review' &&
           steps.craft-prompt.outputs.decision_required == 'true'
         shell: bash
         run: |
@@ -544,7 +548,6 @@ jobs:
         id: parse-ready-decision
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.review-instructions.outputs.mode == 'standard_review' &&
           steps.craft-prompt.outputs.decision_required == 'true'
         shell: bash
         run: |
@@ -622,17 +625,8 @@ jobs:
       - name: Post-review automation (ready + CI trigger)
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
-          (
-            steps.review-instructions.outputs.mode == 'copilot_handoff' ||
-            (
-              steps.parse-ready-decision.outputs.found == 'true' &&
-              steps.parse-ready-decision.outputs.ready == 'true'
-            )
-          )
-        env:
-          MODE: ${{ steps.review-instructions.outputs.mode }}
-          READY_FOUND: ${{ steps.parse-ready-decision.outputs.found || '' }}
-          READY_VALUE: ${{ steps.parse-ready-decision.outputs.ready || '' }}
+          steps.parse-ready-decision.outputs.found == 'true' &&
+          steps.parse-ready-decision.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -645,15 +639,10 @@ jobs:
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
           HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
 
-          COMMIT_REASON="copilot handoff"
-          if [[ "$MODE" == "standard_review" && "$READY_FOUND" == "true" && "$READY_VALUE" == "true" ]]; then
-            COMMIT_REASON="claude ready decision"
-
-            if [[ "$IS_DRAFT" == "true" ]]; then
-              gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
-            else
-              echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping draft transition."
-            fi
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
+          else
+            echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping draft transition."
           fi
 
           if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
@@ -685,5 +674,5 @@ jobs:
 
           git fetch origin "$HEAD_REF"
           git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after ${COMMIT_REASON}"
+          git commit --allow-empty -m "ci: trigger checks after claude ready decision"
           git push origin "HEAD:$HEAD_REF"
