@@ -561,10 +561,10 @@ jobs:
 
           CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
           TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
-          ACTIONABLE_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select((.status != "completed") or (.conclusion != "action_required"))] | length')
+          ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
 
-          if [[ "$ACTIONABLE_CHECKS" -gt 0 ]]; then
-            echo "::notice::PR #${PR_NUMBER} already has actionable checks (queued/running/completed). Skipping empty commit."
+          if [[ "$ACTION_REQUIRED_CHECKS" -eq 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} has no action_required checks (total checks: ${TOTAL_CHECKS}). Skipping empty commit."
             exit 0
           fi
 
@@ -576,7 +576,7 @@ jobs:
             exit 0
           fi
 
-          echo "ℹ️ PR #${PR_NUMBER} checks are missing or only action_required (total checks: ${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
+          echo "ℹ️ PR #${PR_NUMBER} has action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
 
           git config user.name "Claude PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -694,10 +694,10 @@ jobs:
 
           CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
           TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
-          ACTIONABLE_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select((.status != "completed") or (.conclusion != "action_required"))] | length')
+          ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
 
-          if [[ "$ACTIONABLE_CHECKS" -gt 0 ]]; then
-            echo "::notice::PR #${PR_NUMBER} already has actionable checks (queued/running/completed). Skipping empty commit."
+          if [[ "$ACTION_REQUIRED_CHECKS" -eq 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} has no action_required checks (total checks: ${TOTAL_CHECKS}). Skipping empty commit."
             exit 0
           fi
 
@@ -709,7 +709,7 @@ jobs:
             exit 0
           fi
 
-          echo "ℹ️ PR #${PR_NUMBER} checks are missing or only action_required (total checks: ${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
+          echo "ℹ️ PR #${PR_NUMBER} has action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
 
           git config user.name "Claude PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
