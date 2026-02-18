@@ -20,7 +20,7 @@ on:
         required: true
 
 permissions:
-  contents: read  # Note: "contents: write" would eliminate git config errors but is not needed for reviews
+  contents: write
   issues: write
   pull-requests: write
   actions: read
@@ -116,6 +116,7 @@ jobs:
         if: steps.check-permissions.outputs.is_authorized == 'true'
         with:
           fetch-depth: 0
+          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
 
       # Extract PR number based on event type
       - name: Extract PR number
@@ -349,7 +350,16 @@ jobs:
             - Minor suggestions that don't block merge
             - Questions that need clarification before deciding
 
-            IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes."
+            IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes.
+
+            ## Structured Decision Marker (required)
+            At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
+            <!-- CLAUDE_READY_DECISION -->
+            READY_FOR_REVIEW=true|false
+            <!-- /CLAUDE_READY_DECISION -->
+
+            Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
+            Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes."
           fi
 
           # Output the review instructions for use in next step
@@ -368,6 +378,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          DECISION_REQUIRED="false"
 
           # Get review instructions from previous step
           REVIEW_INSTRUCTIONS=$(cat <<'REVIEW_EOF'
@@ -422,6 +434,7 @@ jobs:
 
           elif [[ "${{ steps.extract-comment.outputs.comment_type }}" == "pr_comment" ]]; then
             if [[ "${{ steps.extract-comment.outputs.slash_command }}" == "review" ]]; then
+              DECISION_REQUIRED="true"
               FULL_PROMPT="${BASE_CONTEXT}
 
           ## Slash Command
@@ -457,6 +470,7 @@ jobs:
 
           else
             # Pull request event - review behavior can vary by mode
+            DECISION_REQUIRED="true"
             FULL_PROMPT="${BASE_CONTEXT}
 
           This PR event was triggered by action: ${{ github.event.action }}.
@@ -469,6 +483,7 @@ jobs:
           echo "prompt<<EOF" >> $GITHUB_OUTPUT
           echo "$FULL_PROMPT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          echo "decision_required=$DECISION_REQUIRED" >> $GITHUB_OUTPUT
 
           echo "✅ Crafted prompt for comment type: ${{ steps.extract-comment.outputs.comment_type }}"
       # yamllint enable rule:line-length
@@ -502,15 +517,24 @@ jobs:
               ;;
           esac
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Capture review start timestamp
+        id: review-started-at
+        if: |
+          steps.check-permissions.outputs.is_authorized == 'true' &&
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.review-instructions.outputs.mode == 'standard_review' &&
+          steps.craft-prompt.outputs.decision_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude review
+        uses: anthropics/claude-code-action@v1
         if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-          # Use track_progress based on the check from the previous step
-          # yamllint disable rule:line-length
-          # See: https://github.com/anthropics/claude-code-action/blob/main/docs/migration-guide.md#supported-events-for-track_progress
-          # yamllint enable rule:line-length
           track_progress: ${{ steps.check-track-progress.outputs.track_progress }}
           claude_args: |
             --model claude-opus-4-5-20251101
@@ -531,3 +555,90 @@ jobs:
             mcp__github_pulls__get_pull_request_diff,
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
+
+      - name: Parse structured ready decision
+        id: parse-ready-decision
+        if: |
+          steps.check-permissions.outputs.is_authorized == 'true' &&
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.review-instructions.outputs.mode == 'standard_review' &&
+          steps.craft-prompt.outputs.decision_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
+          RUN_STARTED_AT="${{ steps.review-started-at.outputs.started_at }}"
+          AUTOMATION_LOGIN=$(gh api user --jq '.login')
+
+          COMMENTS_JSON=$(gh api repos/${{ github.repository }}/issues/${PR_NUMBER}/comments --paginate)
+          DECISION_BODY=$(printf '%s' "$COMMENTS_JSON" | jq -r --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
+            [
+              .[]
+              | select(.user.login == $automation_login)
+              | select(.created_at >= $run_started_at)
+              | select(.body | contains("<!-- CLAUDE_READY_DECISION -->"))
+            ]
+            | sort_by(.created_at)
+            | last
+            | .body // empty
+          ')
+
+          if [[ -z "$DECISION_BODY" ]]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No structured ready decision marker found after ${RUN_STARTED_AT}; skipping auto ready."
+            exit 0
+          fi
+
+          READY_VALUE=$(printf '%s\n' "$DECISION_BODY" \
+            | awk -F= '/^READY_FOR_REVIEW=/{print $2; exit}' \
+            | tr '[:upper:]' '[:lower:]')
+
+          case "$READY_VALUE" in
+            true|false)
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "ready=$READY_VALUE" >> "$GITHUB_OUTPUT"
+              echo "✅ Parsed READY_FOR_REVIEW=$READY_VALUE"
+              ;;
+            *)
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Structured decision marker was present but invalid. Expected READY_FOR_REVIEW=true|false."
+              ;;
+          esac
+
+      - name: Mark draft PR ready and trigger CI
+        if: |
+          steps.parse-ready-decision.outputs.found == 'true' &&
+          steps.parse-ready-decision.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
+
+          IS_DRAFT=$(printf '%s' "$PR_JSON" | jq -r '.draft')
+          HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
+          HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
+
+          if [[ "$IS_DRAFT" != "true" ]]; then
+            echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping auto transition and empty commit."
+            exit 0
+          fi
+
+          if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
+            echo "::notice::PR #${PR_NUMBER} head repo is ${HEAD_REPO}; skipping empty commit because branch is not local to target repo."
+            exit 0
+          fi
+
+          gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
+
+          git config user.name "Claude PR Assistant"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "$HEAD_REF"
+          git switch -C "$HEAD_REF" "origin/$HEAD_REF"
+          git commit --allow-empty -m "ci: trigger checks after claude ready decision"
+          git push origin "HEAD:$HEAD_REF"
