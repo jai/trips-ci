@@ -81,9 +81,9 @@ jobs:
       # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
       GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-    # Only run if this is a PR ready for review, or if comment mentions @claude
+    # Run on configured PR events (opened/reopened/ready_for_review) or @claude comments
     if: |
-      github.event_name == 'pull_request' && github.event.action == 'ready_for_review' ||
+      github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
     steps:
@@ -205,16 +205,18 @@ jobs:
             echo "Comment ID: ${COMMENT_ID}"
 
           else
-            # Pull request event (ready_for_review)
+            # Pull request event (opened/reopened/ready_for_review)
+            PR_ACTION="${{ github.event.action }}"
+            PR_IS_DRAFT="${{ github.event.pull_request.draft }}"
             COMMENT_TYPE="pr_event"
-            COMMENT_BODY="PR marked as ready for review"
+            COMMENT_BODY="PR event: ${PR_ACTION} (draft=${PR_IS_DRAFT})"
             COMMENT_ID=""
             COMMENT_URL="$PR_URL"
             COMMENT_AUTHOR="$PR_AUTHOR"
             FILE_PATH=""
             LINE_NUMBER=""
 
-            echo "🚀 PR ready for review by @${COMMENT_AUTHOR}"
+            echo "🚀 PR ${PR_ACTION} by @${COMMENT_AUTHOR} (draft=${PR_IS_DRAFT})"
           fi
 
           # Output all the extracted information
