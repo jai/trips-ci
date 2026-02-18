@@ -540,12 +540,10 @@ jobs:
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
 
-      - name: Trigger CI after Copilot review request
+      - name: Trigger CI for Copilot handoff when checks are blocked
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.review-instructions.outputs.mode == 'copilot_handoff' &&
-          github.event_name == 'pull_request' &&
-          github.event.action == 'review_requested'
+          steps.review-instructions.outputs.mode == 'copilot_handoff'
         shell: bash
         run: |
           set -euo pipefail
@@ -554,18 +552,38 @@ jobs:
           PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
           HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
+          HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
 
           if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
             echo "::notice::PR #${PR_NUMBER} head repo is ${HEAD_REPO}; skipping empty commit because branch is not local to target repo."
             exit 0
           fi
 
+          CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
+          TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
+          ACTIONABLE_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select((.status != "completed") or (.conclusion != "action_required"))] | length')
+
+          if [[ "$ACTIONABLE_CHECKS" -gt 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} already has actionable checks (queued/running/completed). Skipping empty commit."
+            exit 0
+          fi
+
+          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
+            | jq -r '[.[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
+
+          if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} already has a CI trigger empty commit. Skipping additional empty commit."
+            exit 0
+          fi
+
+          echo "ℹ️ PR #${PR_NUMBER} checks are missing or only action_required (total checks: ${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
+
           git config user.name "Claude PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git fetch origin "$HEAD_REF"
           git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after copilot review request"
+          git commit --allow-empty -m "ci: trigger checks after copilot handoff"
           git push origin "HEAD:$HEAD_REF"
 
       - name: Parse structured ready decision
@@ -647,7 +665,7 @@ jobs:
               ;;
           esac
 
-      - name: Mark draft PR ready and trigger CI
+      - name: Mark draft PR ready and trigger CI if checks are blocked
         if: |
           steps.parse-ready-decision.outputs.found == 'true' &&
           steps.parse-ready-decision.outputs.ready == 'true'
@@ -661,10 +679,12 @@ jobs:
           IS_DRAFT=$(printf '%s' "$PR_JSON" | jq -r '.draft')
           HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
+          HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
 
-          if [[ "$IS_DRAFT" != "true" ]]; then
-            echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping auto transition and empty commit."
-            exit 0
+          if [[ "$IS_DRAFT" == "true" ]]; then
+            gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
+          else
+            echo "::notice::PR #${PR_NUMBER} is already ready for review; skipping draft transition."
           fi
 
           if [[ "$HEAD_REPO" != "${{ github.repository }}" ]]; then
@@ -672,7 +692,24 @@ jobs:
             exit 0
           fi
 
-          gh pr ready "${PR_NUMBER}" --repo "${{ github.repository }}"
+          CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
+          TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
+          ACTIONABLE_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select((.status != "completed") or (.conclusion != "action_required"))] | length')
+
+          if [[ "$ACTIONABLE_CHECKS" -gt 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} already has actionable checks (queued/running/completed). Skipping empty commit."
+            exit 0
+          fi
+
+          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
+            | jq -r '[.[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
+
+          if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
+            echo "::notice::PR #${PR_NUMBER} already has a CI trigger empty commit. Skipping additional empty commit."
+            exit 0
+          fi
+
+          echo "ℹ️ PR #${PR_NUMBER} checks are missing or only action_required (total checks: ${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
 
           git config user.name "Claude PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
