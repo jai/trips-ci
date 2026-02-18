@@ -6,6 +6,7 @@
 #   1. PR marked "Ready for review" → Full code review
 #   2. @claude in PR comment → Answer questions or review on demand
 #   3. @claude in inline comment → Reply in thread about specific code
+#   4. /review in PR comment → Manual full-review dispatch (optional extra instructions)
 #
 ---
 name: Claude PR Assistant
@@ -62,6 +63,7 @@ jobs:
           **How to trigger:**
           - 🚀 Open/reopen PRs (including draft PRs)
           - 🔔 Request review from `jai` (triggers assistant run)
+          - 🧭 Comment `/review` (optionally add extra instructions after it)
           - 💬 Tag `@claude` in any comment
           - 📝 Reply to inline code comments with `@claude`
 
@@ -82,10 +84,16 @@ jobs:
       # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
       GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-    # Run on configured PR events (opened/reopened/ready_for_review) or @claude comments
+    # Run on configured PR events, @claude comments, or /review slash command comments
     if: |
       github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (
+        github.event_name == 'issue_comment' &&
+        (
+          contains(github.event.comment.body, '@claude') ||
+          startsWith(github.event.comment.body, '/review')
+        )
+      ) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
     steps:
       # Check if the actor has write or admin permissions on the repository
@@ -178,6 +186,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          SLASH_COMMAND=""
+          SLASH_ARGS=""
+
           if [[ "$EVENT_NAME" == "issue_comment" ]]; then
             # PR comment (not inline)
             COMMENT_TYPE="pr_comment"
@@ -190,6 +201,13 @@ jobs:
 
             echo "💬 PR Comment from @${COMMENT_AUTHOR}"
             echo "Comment ID: ${COMMENT_ID}"
+
+            # Slash command support: /review [optional instructions...]
+            if [[ "$COMMENT_BODY" =~ ^/review([[:space:]]+(.*))?$ ]]; then
+              SLASH_COMMAND="review"
+              SLASH_ARGS="${BASH_REMATCH[2]:-}"
+              echo "🧭 Slash command detected: /review"
+            fi
 
           elif [[ "$EVENT_NAME" == "pull_request_review_comment" ]]; then
             # Inline code review comment
@@ -227,10 +245,16 @@ jobs:
           echo "comment_author=$COMMENT_AUTHOR" >> $GITHUB_OUTPUT
           echo "file_path=$FILE_PATH" >> $GITHUB_OUTPUT
           echo "line_number=$LINE_NUMBER" >> $GITHUB_OUTPUT
+          echo "slash_command=$SLASH_COMMAND" >> $GITHUB_OUTPUT
 
           # Multi-line comment body
           echo "comment_body<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Multi-line slash command args
+          echo "slash_args<<EOF" >> $GITHUB_OUTPUT
+          echo "$SLASH_ARGS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
           # Summary
@@ -238,6 +262,7 @@ jobs:
           echo "  Type: $COMMENT_TYPE"
           echo "  Author: @$COMMENT_AUTHOR"
           [[ -n "$FILE_PATH" ]] && echo "  File: $FILE_PATH:$LINE_NUMBER"
+          [[ -n "$SLASH_COMMAND" ]] && echo "  Slash command: /$SLASH_COMMAND"
           echo "  Message preview: ${COMMENT_BODY:0:100}..."
 
       # Define review instructions
@@ -392,7 +417,27 @@ jobs:
           - Use the in_reply_to parameter to create a threaded reply"
 
           elif [[ "${{ steps.extract-comment.outputs.comment_type }}" == "pr_comment" ]]; then
-            FULL_PROMPT="${BASE_CONTEXT}
+            if [[ "${{ steps.extract-comment.outputs.slash_command }}" == "review" ]]; then
+              SLASH_ARGS=$(cat <<'SLASH_ARGS_EOF'
+              ${{ steps.extract-comment.outputs.slash_args }}
+              SLASH_ARGS_EOF
+              )
+
+              FULL_PROMPT="${BASE_CONTEXT}
+
+          ## Slash Command
+          The user triggered /review on this PR.
+          Treat this as an explicit request for a full review.
+
+          Additional user instructions from /review (if any):
+          ${SLASH_ARGS}
+
+          ${REVIEW_INSTRUCTIONS}
+
+          IMPORTANT: Post your final summary as a PR comment with:
+          gh pr comment --body 'Your response here'"
+            else
+              FULL_PROMPT="${BASE_CONTEXT}
 
           ## User's Comment:
           ${COMMENT_BODY}
@@ -409,6 +454,7 @@ jobs:
 
           IMPORTANT: To respond to this PR comment, use:
           gh pr comment --body 'Your response here'"
+            fi
 
           else
             # Pull request event - review behavior can vary by mode
