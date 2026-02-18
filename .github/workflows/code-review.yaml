@@ -78,6 +78,7 @@ jobs:
   # Main review job
   review:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
