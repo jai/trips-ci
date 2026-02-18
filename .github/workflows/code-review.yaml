@@ -585,10 +585,38 @@ jobs:
           ')
 
           if [[ -z "$DECISION_BODY" ]]; then
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No structured ready decision marker found after ${RUN_STARTED_AT}; skipping auto ready."
-            exit 0
+            REVIEWS_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews --paginate)
+            REVIEW_STATE=$(printf '%s' "$REVIEWS_JSON" | jq -r --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
+              [
+                .[]
+                | select(.user.login == $automation_login)
+                | select(.submitted_at != null and .submitted_at >= $run_started_at)
+              ]
+              | sort_by(.submitted_at)
+              | last
+              | .state // empty
+            ' | tr '[:upper:]' '[:lower:]')
+
+            case "$REVIEW_STATE" in
+              approved)
+                echo "found=true" >> "$GITHUB_OUTPUT"
+                echo "ready=true" >> "$GITHUB_OUTPUT"
+                echo "✅ Structured marker missing; falling back to review state APPROVED."
+                exit 0
+                ;;
+              changes_requested|commented|dismissed)
+                echo "found=true" >> "$GITHUB_OUTPUT"
+                echo "ready=false" >> "$GITHUB_OUTPUT"
+                echo "ℹ️ Structured marker missing; review state is ${REVIEW_STATE}."
+                exit 0
+                ;;
+              *)
+                echo "found=false" >> "$GITHUB_OUTPUT"
+                echo "ready=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::No structured ready marker or qualifying review state found after ${RUN_STARTED_AT}; skipping auto ready."
+                exit 0
+                ;;
+            esac
           fi
 
           READY_VALUE=$(printf '%s\n' "$DECISION_BODY" \
