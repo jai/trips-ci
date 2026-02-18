@@ -418,11 +418,6 @@ jobs:
 
           elif [[ "${{ steps.extract-comment.outputs.comment_type }}" == "pr_comment" ]]; then
             if [[ "${{ steps.extract-comment.outputs.slash_command }}" == "review" ]]; then
-              SLASH_ARGS=$(cat <<'SLASH_ARGS_EOF'
-              ${{ steps.extract-comment.outputs.slash_args }}
-              SLASH_ARGS_EOF
-              )
-
               FULL_PROMPT="${BASE_CONTEXT}
 
           ## Slash Command
@@ -430,7 +425,7 @@ jobs:
           Treat this as an explicit request for a full review.
 
           Additional user instructions from /review (if any):
-          ${SLASH_ARGS}
+          ${{ steps.extract-comment.outputs.slash_args }}
 
           ${REVIEW_INSTRUCTIONS}
 
