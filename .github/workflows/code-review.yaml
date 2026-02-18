@@ -671,7 +671,7 @@ jobs:
           fi
 
           TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
-            | jq -r '[.[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
+            | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
 
           if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
             echo "::notice::PR #${PR_NUMBER} already has a CI trigger empty commit. Skipping additional empty commit."
