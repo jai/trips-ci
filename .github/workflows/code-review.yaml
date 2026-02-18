@@ -286,6 +286,10 @@ jobs:
             - Post exactly ONE PR comment addressed to @copilot with a clear, actionable list of required code changes.
             - Include file paths, expected behavior, and acceptance criteria for each requested change.
             - Keep the comment implementation-focused so Copilot can push commits directly.
+            - Treat code sanity, cleanup, and maintainability as first-class review concerns, not optional nice-to-haves.
+            - If maintainability/cleanup issues are reasonably fixable in this PR, explicitly instruct @copilot to implement them now in this same PR.
+            - Do not defer cleanup to future PRs unless the change is truly out of scope or too risky; if deferred, state why.
+            - Prioritize instructions as: (1) correctness/security, (2) reliability/tests, (3) maintainability/cleanup.
             - Do NOT approve or request changes in this mode.
             - Do NOT push commits yourself in this mode.
             - After posting the @copilot instruction comment, stop."
