@@ -8,7 +8,7 @@
 #   3. @claude in inline comment → Reply in thread about specific code
 #
 ---
-name: Code Review
+name: Claude PR Assistant
 
 on:
   workflow_call:
@@ -40,7 +40,7 @@ jobs:
         run: |
           # Check if we already posted a welcome message
           WELCOME_EXISTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            --jq '[.[] | select(.body | contains("🤖 **Code Review Assistant**"))] | length')
+            --jq '[.[] | select(.body | (contains("🤖 **Claude PR Assistant**") or contains("🤖 **Code Review Assistant**")))] | length')
 
           if [[ "$WELCOME_EXISTS" -gt 0 ]]; then
             echo "found=true" >> $GITHUB_OUTPUT
@@ -55,22 +55,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} --body "$(cat <<'EOF'
-          🤖 **Code Review Assistant**
+          🤖 **Claude PR Assistant**
 
-          Welcome! This PR has access to AI-powered code reviews using **Claude Opus 4.5** - Anthropic's most powerful coding model.
+          Welcome! This PR has access to AI-powered assistant support using **Claude Opus 4.5**.
 
-          **How to trigger a review:**
-          - 🚀 Mark your PR as "Ready for review" from draft status
-          - 💬 Tag `@claude` in any comment to ask questions or request a review
-          - 📝 Reply to inline code comments with `@claude` for specific feedback
+          **How to trigger:**
+          - 🚀 Open/reopen PRs (including draft PRs)
+          - 🔔 Request review from `jai` (triggers assistant run)
+          - 💬 Tag `@claude` in any comment
+          - 📝 Reply to inline code comments with `@claude`
 
           **What I can help with:**
-          - Comprehensive code reviews (security, performance, best practices)
-          - Answer specific technical questions
-          - Suggest improvements and fixes
-          - Review test coverage and documentation
+          - Comprehensive review feedback (security, performance, best practices)
+          - Specific technical Q&A
+          - Suggested fixes and follow-up actions (including `@copilot` delegation)
+          - Test and documentation checks
 
-          _Note: Only users with write, maintain, or admin permissions can trigger reviews._
+          _Note: Only users with write, maintain, or admin permissions can trigger runs._
           EOF
           )"
         # yamllint enable rule:line-length
@@ -239,76 +240,96 @@ jobs:
           [[ -n "$FILE_PATH" ]] && echo "  File: $FILE_PATH:$LINE_NUMBER"
           echo "  Message preview: ${COMMENT_BODY:0:100}..."
 
-      # Define standard PR review instructions
+      # Define review instructions
       - name: Define review instructions
         id: review-instructions
         if: steps.check-permissions.outputs.is_authorized == 'true' && steps.extract-pr.outputs.has_pr == 'true'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          REQUESTED_REVIEWER: ${{ github.event.requested_reviewer.login || '' }}
         shell: bash
         run: |
-          # Standard PR review instructions - kept separate for clarity and reusability
-          REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
+          MODE="standard_review"
 
-          1. **Code Quality**
-             - Clean code principles and best practices
-             - Proper error handling and edge cases
-             - Code readability and maintainability
+          if [[ "$EVENT_NAME" == "pull_request" && "$EVENT_ACTION" == "review_requested" && "$REQUESTED_REVIEWER" == "jai" ]]; then
+            MODE="copilot_handoff"
+            REVIEW_INSTRUCTIONS="Perform a comprehensive review, then delegate concrete fixes to @copilot.
 
-          2. **Security**
-             - Check for potential security vulnerabilities
-             - Validate input sanitization
-             - Review authentication/authorization logic
+            ## Copilot Handoff Mode
+            - This run was triggered by pull_request/review_requested for reviewer @jai.
+            - Post exactly ONE PR comment addressed to @copilot with a clear, actionable list of required code changes.
+            - Include file paths, expected behavior, and acceptance criteria for each requested change.
+            - Keep the comment implementation-focused so Copilot can push commits directly.
+            - Do NOT approve or request changes in this mode.
+            - Do NOT push commits yourself in this mode.
+            - After posting the @copilot instruction comment, stop."
+          else
+            REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
 
-          3. **Performance**
-             - Identify potential performance bottlenecks
-             - Review database queries for efficiency
-             - Check for memory leaks or resource issues
+            1. **Code Quality**
+               - Clean code principles and best practices
+               - Proper error handling and edge cases
+               - Code readability and maintainability
 
-          4. **Testing**
-             - Verify adequate test coverage
-             - Review test quality and edge cases
-             - Check for missing test scenarios
+            2. **Security**
+               - Check for potential security vulnerabilities
+               - Validate input sanitization
+               - Review authentication/authorization logic
 
-          5. **Documentation**
-             - Ensure code is properly documented
-             - Verify README updates for new features
-             - Check API documentation accuracy
+            3. **Performance**
+               - Identify potential performance bottlenecks
+               - Review database queries for efficiency
+               - Check for memory leaks or resource issues
 
-          Use inline comments ONLY for issues that need to be fixed or changed.
-          Do NOT leave inline comments for praise or positive observations.
-          Post a final summary review using 'gh pr comment'.
+            4. **Testing**
+               - Verify adequate test coverage
+               - Review test quality and edge cases
+               - Check for missing test scenarios
 
-          ## Approval Decision
+            5. **Documentation**
+               - Ensure code is properly documented
+               - Verify README updates for new features
+               - Check API documentation accuracy
 
-          After completing your review, you MUST make an approval decision:
+            Use inline comments ONLY for issues that need to be fixed or changed.
+            Do NOT leave inline comments for praise or positive observations.
+            Post a final summary review using 'gh pr comment'.
 
-          **APPROVE the PR** if ALL of these conditions are met:
-          - No security vulnerabilities found
-          - No critical bugs or logic errors
-          - Code follows project conventions
-          - Tests pass (if applicable)
+            ## Approval Decision
 
-          To approve, run: gh pr review --approve --body 'LGTM - Code review passed. [brief summary of what was reviewed]'
+            After completing your review, you MUST make an approval decision:
 
-          **REQUEST CHANGES** if ANY blocking issues are found:
-          - Security vulnerabilities
-          - Critical bugs
-          - Missing required tests for new functionality
-          - Breaking changes without migration path
+            **APPROVE the PR** if ALL of these conditions are met:
+            - No security vulnerabilities found
+            - No critical bugs or logic errors
+            - Code follows project conventions
+            - Tests pass (if applicable)
 
-          To request changes, run: gh pr review --request-changes --body '[summary of required changes]'
+            To approve, run: gh pr review --approve --body 'LGTM - Code review passed. [brief summary of what was reviewed]'
 
-          **COMMENT only** (no approval/rejection) if:
-          - Minor suggestions that don't block merge
-          - Questions that need clarification before deciding
+            **REQUEST CHANGES** if ANY blocking issues are found:
+            - Security vulnerabilities
+            - Critical bugs
+            - Missing required tests for new functionality
+            - Breaking changes without migration path
 
-          IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes."
+            To request changes, run: gh pr review --request-changes --body '[summary of required changes]'
+
+            **COMMENT only** (no approval/rejection) if:
+            - Minor suggestions that don't block merge
+            - Questions that need clarification before deciding
+
+            IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes."
+          fi
 
           # Output the review instructions for use in next step
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
           echo "instructions<<EOF" >> $GITHUB_OUTPUT
           echo "$REVIEW_INSTRUCTIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          echo "✅ Review instructions defined"
+          echo "✅ Review instructions defined (mode=${MODE})"
 
       # yamllint disable rule:line-length
       # Craft the prompt based on comment type
@@ -390,10 +411,11 @@ jobs:
           gh pr comment --body 'Your response here'"
 
           else
-            # PR marked ready for review - always do full review
+            # Pull request event - review behavior can vary by mode
             FULL_PROMPT="${BASE_CONTEXT}
 
-          This PR has been marked as ready for review.
+          This PR event was triggered by action: ${{ github.event.action }}.
+          Review mode: ${{ steps.review-instructions.outputs.mode }}.
 
           ${REVIEW_INSTRUCTIONS}"
           fi
