@@ -270,8 +270,8 @@ jobs:
             - Include file paths, expected behavior, and acceptance criteria for each requested change.
             - Keep the comment implementation-focused so Copilot can push commits directly.
             - Explicitly instruct @copilot to push commits to this existing PR branch (update this PR directly).
-            - Do not ask @copilot to open a new PR/sub-PR unless branch permissions make direct pushes impossible.
-            - If direct push is impossible, require @copilot to state the exact constraint before opening any fallback PR.
+            - Do NOT ask @copilot to open a new PR/sub-PR for these fixes.
+            - If direct push is impossible, require @copilot to post the exact constraint in this PR thread and stop (no fallback PR creation).
             - Treat code sanity, cleanup, and maintainability as first-class review concerns, not optional nice-to-haves.
             - If maintainability/cleanup issues are reasonably fixable in this PR, explicitly instruct @copilot to implement them now in this same PR.
             - Do not defer cleanup to future PRs unless the change is truly out of scope or too risky; if deferred, state why.
