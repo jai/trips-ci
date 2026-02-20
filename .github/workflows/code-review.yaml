@@ -310,8 +310,6 @@ jobs:
             - Tests pass (if applicable)
 
             To approve, run: gh pr review --approve --body 'LGTM - Code review passed. [brief summary of what was reviewed]'
-            After approving, enable auto-merge with:
-            gh pr merge --auto --repo ${{ github.repository }} ${{ steps.extract-pr.outputs.pr_number }}
 
             **REQUEST CHANGES** only if hard-blocked after attempting direct fixes:
             - You cannot push required changes from this workflow
