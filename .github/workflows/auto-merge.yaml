@@ -1,0 +1,26 @@
+# Auto-Merge Workflow
+# Enables auto-merge (squash) on PRs as soon as they're opened.
+# Merge won't happen until all branch protection / ruleset requirements are met.
+# Called by downstream repos via workflow_call.
+---
+name: Auto-Merge
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
+        run: |
+          gh pr merge --auto --squash \
+            "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
