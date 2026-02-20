@@ -28,7 +28,7 @@ permissions:
 jobs:
   # Job to post welcome message when PR is opened
   welcome:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +77,7 @@ jobs:
         # yamllint enable rule:line-length
   # Main review job
   review:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 30
     env:
       # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
