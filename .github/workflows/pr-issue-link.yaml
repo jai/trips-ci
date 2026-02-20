@@ -1,0 +1,45 @@
+---
+name: PR Issue Link
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-issue-link:
+    name: Validate PR issue link
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Enforce PR body issue reference
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+
+          EXEMPT_PREFIX_REGEX='^(release|chore|ci|deps)(\(|:|/|\b)'
+          AUTO_CLOSE_REGEX='(closes|fixes|resolves)[[:space:]]+#([0-9]+)'
+          REFS_REGEX='(refs?)[[:space:]]+#([0-9]+)'
+
+          if [[ "$PR_TITLE" =~ $EXEMPT_PREFIX_REGEX ]]; then
+            echo "::notice::PR title starts with exempt prefix (release/chore/ci/deps); skipping PR→issue link enforcement."
+            exit 0
+          fi
+
+          if [[ "$PR_BODY" =~ $AUTO_CLOSE_REGEX ]]; then
+            echo "✅ Found auto-close issue reference in PR body (Closes/Fixes/Resolves #N)."
+            exit 0
+          fi
+
+          if [[ "$PR_BODY" =~ $REFS_REGEX ]]; then
+            echo "::warning::Refs won't auto-close, use Closes #N"
+            exit 0
+          fi
+
+          echo "::error::PR body must reference at least one issue (e.g. Closes #123). Refs won't auto-close. Exempt title prefixes: release/chore/ci/deps."
+          exit 1
