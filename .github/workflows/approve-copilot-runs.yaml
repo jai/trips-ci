@@ -1,6 +1,6 @@
 # Auto-approve Copilot workflow runs
 # GitHub blocks Copilot-authored events from triggering Actions (security policy).
-# This workflow re-runs action_required runs from copilot-swe-agent every 15 min.
+# This workflow re-runs action_required runs from the last 24h across all Trips repos.
 ---
 name: Approve Copilot Runs
 
@@ -13,7 +13,7 @@ jobs:
   approve:
     runs-on: ubicloud-standard-2
     steps:
-      - name: Re-run action_required Copilot workflows
+      - name: Re-run recent action_required Copilot workflows
         env:
           GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
         run: |
@@ -26,15 +26,21 @@ jobs:
             jai/trips-fastlane
           )
 
+          # Only look at runs from the last 24 hours
+          SINCE=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+
           for repo in "${REPOS[@]}"; do
             echo "Checking $repo..."
-            run_ids=$(gh api "repos/$repo/actions/runs?status=action_required&per_page=100" \
+            run_ids=$(gh api "repos/$repo/actions/runs?status=action_required&created=>=$SINCE&per_page=100" \
               --jq '.workflow_runs[].id' 2>/dev/null || true)
 
             if [[ -z "$run_ids" ]]; then
-              echo "  No action_required runs"
+              echo "  No recent action_required runs"
               continue
             fi
+
+            count=$(echo "$run_ids" | wc -l)
+            echo "  Found $count runs to re-run"
 
             for run_id in $run_ids; do
               echo "  Re-running $run_id..."
