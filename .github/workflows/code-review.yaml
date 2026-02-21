@@ -79,6 +79,9 @@ jobs:
   review:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
+    concurrency:
+      group: code-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     env:
       # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
@@ -185,9 +188,11 @@ jobs:
             echo "Comment ID: ${COMMENT_ID}"
 
             # Slash command support: /review [optional instructions...]
-            if [[ "$COMMENT_BODY" =~ ^/review([[:space:]]+(.*))?$ ]]; then
+            # Handle multiline comments by matching command prefix only, then trimming args separately.
+            if [[ "$COMMENT_BODY" =~ ^/review($|[[:space:]]) ]]; then
               SLASH_COMMAND="review"
-              SLASH_ARGS="${BASH_REMATCH[2]:-}"
+              SLASH_ARGS="${COMMENT_BODY#/review}"
+              SLASH_ARGS="${SLASH_ARGS#"${SLASH_ARGS%%[![:space:]]*}"}"
               echo "🧭 Slash command detected: /review"
             fi
 
@@ -395,6 +400,14 @@ jobs:
           COMMENT_EOF
           )
 
+          COMMENT_BODY_LOWER=$(printf '%s' "$COMMENT_BODY" | tr '[:upper:]' '[:lower:]')
+          REVIEW_REQUEST_DETECTED="false"
+
+          if [[ "${{ steps.extract-comment.outputs.comment_type }}" == "pr_comment" ]] \
+            && printf '%s\n' "$COMMENT_BODY_LOWER" | grep -Eiq '(^|[[:space:][:punct:]])(please[[:space:]]+)?(can[[:space:]]+you[[:space:]]+)?(do[[:space:]]+a[[:space:]]+)?(full[[:space:]]+)?(code[[:space:]]+)?review([[:space:][:punct:]]|$)|review[[:space:]]+(this|the|my)?[[:space:]]*(pr|pull[[:space:]]+request|changes|code)|ready[[:space:]]+for[[:space:]]+review|take[[:space:]]+a[[:space:]]+look'; then
+            REVIEW_REQUEST_DETECTED="true"
+          fi
+
           # Craft prompt based on comment type
           if [[ "${{ steps.extract-comment.outputs.comment_type }}" == "inline_comment" ]]; then
             FULL_PROMPT="${BASE_CONTEXT}
@@ -430,6 +443,21 @@ jobs:
 
           Additional user instructions from /review (if any):
           ${{ steps.extract-comment.outputs.slash_args }}
+
+          ${REVIEW_INSTRUCTIONS}
+
+          IMPORTANT: Post your final summary as a PR comment with:
+          gh pr comment --body 'Your response here'"
+            elif [[ "$REVIEW_REQUEST_DETECTED" == "true" ]]; then
+              DECISION_REQUIRED="true"
+              FULL_PROMPT="${BASE_CONTEXT}
+
+          ## Natural-language Review Request
+          The user requested a full PR review without using /review.
+          Treat this as a full-review request and follow the full-review automation path.
+
+          User's comment:
+          ${COMMENT_BODY}
 
           ${REVIEW_INSTRUCTIONS}
 
@@ -617,6 +645,77 @@ jobs:
               ;;
           esac
 
+      - name: Tag @copilot when Claude cannot push required fixes
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.craft-prompt.outputs.decision_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
+          RUN_STARTED_AT="${{ steps.review-started-at.outputs.started_at }}"
+          AUTOMATION_LOGIN=$(gh api user --jq '.login')
+
+          COMMENTS_JSON=$(gh api repos/${{ github.repository }}/issues/${PR_NUMBER}/comments --paginate)
+          REVIEWS_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews --paginate)
+
+          EXISTING_ESCALATION_COUNT=$(printf '%s' "$COMMENTS_JSON" | jq -cs --arg automation_login "$AUTOMATION_LOGIN" '
+            [
+              .[]
+              | .[]?
+              | select(.user.login == $automation_login)
+              | select(.body | contains("<!-- CLAUDE_COPILOT_ESCALATION -->"))
+            ]
+            | length
+          ')
+
+          if [[ "$EXISTING_ESCALATION_COUNT" -gt 0 ]]; then
+            echo "::notice::Existing @copilot escalation marker found; skipping duplicate tag."
+            exit 0
+          fi
+
+          COMMENT_EVENTS=$(printf '%s' "$COMMENTS_JSON" | jq -cs --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
+            [
+              .[]
+              | .[]?
+              | select(.user.login == $automation_login)
+              | select(.created_at >= $run_started_at)
+              | {ts: .created_at, body: (.body // "")}
+            ]
+          ')
+
+          REVIEW_EVENTS=$(printf '%s' "$REVIEWS_JSON" | jq -cs --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
+            [
+              .[]
+              | .[]?
+              | select(.user.login == $automation_login)
+              | select(.submitted_at != null and .submitted_at >= $run_started_at)
+              | {ts: .submitted_at, body: (.body // "")}
+            ]
+          ')
+
+          LATEST_AUTOMATION_TEXT=$(jq -n \
+            --argjson comment_events "$COMMENT_EVENTS" \
+            --argjson review_events "$REVIEW_EVENTS" '
+            [ $comment_events[], $review_events[] ]
+            | sort_by(.ts)
+            | last
+            | .body // ""
+          ')
+
+          if [[ -z "$LATEST_AUTOMATION_TEXT" ]]; then
+            echo "::notice::No recent automation output found to evaluate for @copilot escalation."
+            exit 0
+          fi
+
+          if printf '%s\n' "$LATEST_AUTOMATION_TEXT" | grep -Eiq "blocked:|cannot push|can't push|unable to push|no permission|permission denied|write access|branch protection|protected branch|head repo is .*fork"; then
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body $'@copilot Claude identified required fixes but could not push them from this workflow due to repository constraints.\n\nPlease apply the requested fixes from Claude\'s latest review output and push them to this PR branch, then trigger `/review` again.\n\n<!-- CLAUDE_COPILOT_ESCALATION -->'
+            echo "✅ Tagged @copilot for blocked fix follow-up."
+          else
+            echo "::notice::No blocked push signal detected; skipping @copilot tag."
+          fi
+
       - name: Post-review automation (ready + CI trigger)
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
@@ -634,12 +733,37 @@ jobs:
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
           HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
 
-          UNRESOLVED_THREADS=$(gh api graphql \
-            -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner:$owner, name:$repo) { pullRequest(number:$number) { reviewThreads(first:100) { nodes { isResolved } } } } }' \
-            -F owner='${{ github.repository_owner }}' \
-            -F repo='${{ github.event.repository.name }}' \
-            -F number="$PR_NUMBER" \
-            | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length')
+          THREADS_QUERY='query($owner:String!, $repo:String!, $number:Int!, $after:String) { repository(owner:$owner, name:$repo) { pullRequest(number:$number) { reviewThreads(first:100, after:$after) { pageInfo { hasNextPage endCursor } nodes { isResolved } } } } }'
+
+          UNRESOLVED_THREADS=0
+          THREAD_CURSOR=""
+
+          while true; do
+            if [[ -n "$THREAD_CURSOR" ]]; then
+              THREADS_PAGE=$(gh api graphql \
+                -f query="$THREADS_QUERY" \
+                -F owner='${{ github.repository_owner }}' \
+                -F repo='${{ github.event.repository.name }}' \
+                -F number="$PR_NUMBER" \
+                -f after="$THREAD_CURSOR")
+            else
+              THREADS_PAGE=$(gh api graphql \
+                -f query="$THREADS_QUERY" \
+                -F owner='${{ github.repository_owner }}' \
+                -F repo='${{ github.event.repository.name }}' \
+                -F number="$PR_NUMBER")
+            fi
+
+            PAGE_UNRESOLVED=$(printf '%s' "$THREADS_PAGE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length')
+            UNRESOLVED_THREADS=$((UNRESOLVED_THREADS + PAGE_UNRESOLVED))
+
+            HAS_NEXT_PAGE=$(printf '%s' "$THREADS_PAGE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+            THREAD_CURSOR=$(printf '%s' "$THREADS_PAGE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // empty')
+
+            if [[ "$HAS_NEXT_PAGE" != "true" ]]; then
+              break
+            fi
+          done
 
           if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
             echo "::error::READY_FOR_REVIEW=true but PR #${PR_NUMBER} still has ${UNRESOLVED_THREADS} unresolved review threads."
