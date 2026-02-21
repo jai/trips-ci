@@ -285,7 +285,7 @@ jobs:
             - For every blocking issue you find, you MUST implement the fix directly on this PR branch and push commit(s).
             - Iterate review -> fix -> verify until no blocking issues remain.
             - Do NOT delegate fixes to Copilot or ask another agent to implement them.
-            - You MUST resolve ALL review threads before approving. See "Review Thread Resolution" section below.
+            - You MUST resolve ALL review threads before approving. See the Review Thread Resolution section below.
             - For each thread: implement valid suggestions, dismiss false positives with rationale, then resolve.
             - You may use REQUEST_CHANGES only when hard-blocked by an external constraint you cannot resolve in-workflow.
               Hard-block examples:
@@ -293,7 +293,7 @@ jobs:
               - unresolved merge conflict/rebase that cannot be completed in this workflow
               - required secret or external system unavailable
               - missing product/owner decision required to proceed
-            - When hard-blocked, post one explicit "BLOCKED:" summary comment with the exact blocker and exact next action.
+            - When hard-blocked, post one explicit BLOCKED: summary comment with the exact blocker and exact next action.
 
             Use inline comments ONLY for issues that need to be fixed or changed.
             Do NOT leave inline comments for praise or positive observations.
@@ -336,7 +336,7 @@ jobs:
 
             Escape hatch (rare — use sparingly):
             5. **Genuinely blocked** (needs human product decision, external dependency, or repo permission you lack) →
-               Reply with "BLOCKED: [exact reason]" in the thread. Do NOT resolve. Do NOT set READY_FOR_REVIEW=true.
+               Reply with BLOCKED: [exact reason] in the thread. Do NOT resolve. Do NOT set READY_FOR_REVIEW=true.
 
             The rule is simple: **zero unresolved threads = can approve. Any unresolved thread = cannot approve.**
             The post-review automation will hard-fail if READY_FOR_REVIEW=true but unresolved threads remain.
