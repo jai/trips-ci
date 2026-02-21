@@ -1,0 +1,67 @@
+# Claude Code Review Welcome Workflow
+# Extracted from code-review.yaml for reusable welcome-comment behavior
+
+---
+name: Code Review Welcome
+
+on:
+  workflow_call:
+    secrets:
+      GH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  welcome:
+    runs-on: ubicloud-standard-2
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for existing welcome message
+        id: check-welcome
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        # yamllint disable rule:line-length
+        run: |
+          # Check if we already posted a welcome message
+          WELCOME_EXISTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '[.[] | select(.body | (contains("🤖 **Claude PR Assistant**") or contains("🤖 **Code Review Assistant**")))] | length')
+
+          if [[ "$WELCOME_EXISTS" -gt 0 ]]; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Welcome message already exists"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "📝 Need to post welcome message"
+          fi
+      - name: Post welcome message
+        if: steps.check-welcome.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "$(cat <<'EOF'
+          🤖 **Claude PR Assistant**
+
+          Welcome! This PR has access to AI-powered assistant support using **Claude Opus**.
+
+          **How to trigger:**
+          - 🚀 Open/reopen PRs (including draft PRs)
+          - 🧭 Comment `/review` (optionally add extra instructions after it)
+          - 💬 Tag `@claude` in any comment
+          - 📝 Reply to inline code comments with `@claude`
+
+          **What I can help with:**
+          - Comprehensive review feedback (security, performance, best practices)
+          - Specific technical Q&A
+          - Direct code fixes on this PR when safe and appropriate
+          - Test and documentation checks
+
+          EOF
+          )"
+        # yamllint enable rule:line-length
