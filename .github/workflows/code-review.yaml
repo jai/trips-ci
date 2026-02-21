@@ -285,8 +285,8 @@ jobs:
             - For every blocking issue you find, you MUST implement the fix directly on this PR branch and push commit(s).
             - Iterate review -> fix -> verify until no blocking issues remain.
             - Do NOT delegate fixes to Copilot or ask another agent to implement them.
-            - Resolve review threads when the underlying issue is fully addressed.
-            - If any issue is not fixed, keep the related thread unresolved and explain exactly why in a PR comment.
+            - You MUST resolve ALL review threads before approving. See "Review Thread Resolution" section below.
+            - For each thread: implement valid suggestions, dismiss false positives with rationale, then resolve.
             - You may use REQUEST_CHANGES only when hard-blocked by an external constraint you cannot resolve in-workflow.
               Hard-block examples:
               - no permission/policy to push to the PR branch
@@ -324,11 +324,22 @@ jobs:
 
             IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes.
 
-            ## Review Thread Resolution (required)
-            - Before finalizing, inspect all open review threads on this PR.
-            - Resolve every thread whose underlying issue is fully addressed (use GitHub CLI/API as needed).
-            - If any thread cannot be resolved yet, explain exactly why in a PR comment and keep it unresolved.
-            - Do NOT set READY_FOR_REVIEW=true while unresolved actionable review threads remain.
+            ## Review Thread Resolution (MANDATORY — zero unresolved threads before approve)
+            Before finalizing, you MUST inspect ALL open review threads on this PR and resolve every single one.
+            Use `gh api graphql` with the `resolveReviewThread` mutation to resolve threads programmatically.
+
+            For each unresolved thread, apply ONE of these actions:
+            1. **Valid suggestion** → Implement the fix, push a commit, reply confirming the fix, then RESOLVE the thread.
+            2. **False positive / not applicable** → Reply explaining WHY it's incorrect or not relevant, then RESOLVE the thread.
+            3. **Already addressed** → Reply noting where/how it was addressed, then RESOLVE the thread.
+            4. **Intentional design choice** → Reply with the rationale, then RESOLVE the thread.
+
+            Escape hatch (rare — use sparingly):
+            5. **Genuinely blocked** (needs human product decision, external dependency, or repo permission you lack) →
+               Reply with "BLOCKED: [exact reason]" in the thread. Do NOT resolve. Do NOT set READY_FOR_REVIEW=true.
+
+            The rule is simple: **zero unresolved threads = can approve. Any unresolved thread = cannot approve.**
+            The post-review automation will hard-fail if READY_FOR_REVIEW=true but unresolved threads remain.
 
             ## Structured Decision Marker (required)
             At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
