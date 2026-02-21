@@ -1,0 +1,253 @@
+# Claude conversational/inline response workflow
+# Extracted from code-review.yaml for reusable routing
+
+---
+name: Claude PR Assistant Respond
+
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      CLAUDE_REVIEW_GH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  respond:
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 30
+    env:
+      # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
+      GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+    if: |
+      (
+        github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        !startsWith(github.event.comment.body, '/')
+      ) ||
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude')
+      )
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+
+      - name: Extract PR number
+        id: extract-pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Event: ${{ github.event_name }}"
+
+          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            # For issue_comment events on PRs, the PR number is in issue.number
+            # Verify this is actually a PR comment, not an issue comment
+            if [[ "${{ github.event.issue.pull_request }}" != "" ]]; then
+              PR_NUMBER="${{ github.event.issue.number }}"
+              echo "💬 PR number from issue_comment event: $PR_NUMBER"
+            else
+              echo "⚠️ Issue comment is not on a PR, skipping"
+              echo "::notice::Skipping: Comment is on an issue, not a pull request"
+              echo "has_pr=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          elif [[ "${{ github.event_name }}" == "pull_request_review_comment" ]]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            echo "📝 PR number from pull_request_review_comment event: $PR_NUMBER"
+          else
+            echo "⚠️ Could not determine PR number for event: ${{ github.event_name }}"
+            echo "::error::Unsupported event type: ${{ github.event_name }}"
+            exit 1
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "has_pr=true" >> $GITHUB_OUTPUT
+          echo "✅ Using PR number: $PR_NUMBER"
+
+      - name: Extract comment details
+        id: extract-comment
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY_ISSUE: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
+          COMMENT_BODY_REVIEW: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.body || '' }}
+          COMMENT_ID_ISSUE: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}
+          COMMENT_ID_REVIEW: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.id || '' }}
+          COMMENT_URL_ISSUE: >
+            ${{ github.event_name == 'issue_comment' && github.event.comment.html_url || '' }}
+          COMMENT_URL_REVIEW: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.html_url || '' }}
+          COMMENT_AUTHOR_ISSUE: >
+            ${{ github.event_name == 'issue_comment' && github.event.comment.user.login || '' }}
+          COMMENT_AUTHOR_REVIEW: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.user.login || '' }}
+          REVIEW_FILE_PATH: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.path || '' }}
+          REVIEW_LINE: ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.line || '' }}
+          REVIEW_ORIG_LINE: >
+            ${{ github.event_name == 'pull_request_review_comment' && github.event.comment.original_line || '' }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            # PR comment (not inline)
+            COMMENT_TYPE="pr_comment"
+            COMMENT_BODY="$COMMENT_BODY_ISSUE"
+            COMMENT_ID="$COMMENT_ID_ISSUE"
+            COMMENT_URL="$COMMENT_URL_ISSUE"
+            COMMENT_AUTHOR="$COMMENT_AUTHOR_ISSUE"
+            FILE_PATH=""
+            LINE_NUMBER=""
+
+            echo "💬 PR Comment from @${COMMENT_AUTHOR}"
+            echo "Comment ID: ${COMMENT_ID}"
+
+          elif [[ "$EVENT_NAME" == "pull_request_review_comment" ]]; then
+            # Inline code review comment
+            COMMENT_TYPE="inline_comment"
+            COMMENT_BODY="$COMMENT_BODY_REVIEW"
+            COMMENT_ID="$COMMENT_ID_REVIEW"
+            COMMENT_URL="$COMMENT_URL_REVIEW"
+            COMMENT_AUTHOR="$COMMENT_AUTHOR_REVIEW"
+            FILE_PATH="$REVIEW_FILE_PATH"
+            LINE_NUMBER="${REVIEW_LINE:-$REVIEW_ORIG_LINE}"
+
+            echo "📝 Inline Comment from @${COMMENT_AUTHOR}"
+            echo "File: ${FILE_PATH}:${LINE_NUMBER}"
+            echo "Comment ID: ${COMMENT_ID}"
+
+          else
+            echo "::error::Unsupported event type in extract-comment: $EVENT_NAME"
+            exit 1
+          fi
+
+          echo "comment_type=$COMMENT_TYPE" >> $GITHUB_OUTPUT
+          echo "comment_id=$COMMENT_ID" >> $GITHUB_OUTPUT
+          echo "comment_url=$COMMENT_URL" >> $GITHUB_OUTPUT
+          echo "comment_author=$COMMENT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "file_path=$FILE_PATH" >> $GITHUB_OUTPUT
+          echo "line_number=$LINE_NUMBER" >> $GITHUB_OUTPUT
+
+          # Multi-line comment body
+          echo "comment_body<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMENT_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "✅ Extracted comment details:"
+          echo "  Type: $COMMENT_TYPE"
+          echo "  Author: @$COMMENT_AUTHOR"
+          [[ -n "$FILE_PATH" ]] && echo "  File: $FILE_PATH:$LINE_NUMBER"
+          echo "  Message preview: ${COMMENT_BODY:0:100}..."
+
+      # yamllint disable rule:line-length
+      - name: Craft prompt for Claude
+        id: craft-prompt
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_CONTEXT="REPO: ${{ github.repository }}
+          PR NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+
+          ## User Comment Details
+          - **Type**: ${{ steps.extract-comment.outputs.comment_type }}
+          - **Author**: @${{ steps.extract-comment.outputs.comment_author }}"
+
+          if [[ "${{ steps.extract-comment.outputs.comment_type }}" == "inline_comment" ]]; then
+            BASE_CONTEXT="${BASE_CONTEXT}
+          - **File**: ${{ steps.extract-comment.outputs.file_path }}:${{ steps.extract-comment.outputs.line_number }}
+          - **Comment ID**: ${{ steps.extract-comment.outputs.comment_id }}"
+          fi
+
+          COMMENT_BODY=$(cat <<'COMMENT_EOF'
+          ${{ steps.extract-comment.outputs.comment_body }}
+          COMMENT_EOF
+          )
+
+          if [[ "${{ steps.extract-comment.outputs.comment_type }}" == "inline_comment" ]]; then
+            FULL_PROMPT="${BASE_CONTEXT}
+
+          ## User's Inline Comment:
+          ${COMMENT_BODY}
+
+          ---
+
+          The user has commented on a specific line of code in ${{ steps.extract-comment.outputs.file_path }} at line ${{ steps.extract-comment.outputs.line_number }}.
+
+          IMPORTANT: To reply to this inline comment, use the following API endpoint:
+          gh api -X POST /repos/${{ github.repository }}/pulls/${{ steps.extract-pr.outputs.pr_number }}/comments \\
+            -f body='Your reply message' \\
+            -F in_reply_to=${{ steps.extract-comment.outputs.comment_id }}
+
+          Analyze their comment and respond appropriately:
+          - If they're asking a question about the code, answer it directly
+          - If they're pointing out an issue, acknowledge and discuss it
+          - If they're requesting a change, evaluate and respond
+          - Focus on the specific code context they're commenting on
+          - Be concise and directly relevant to their comment
+          - Use the in_reply_to parameter to create a threaded reply"
+          else
+            FULL_PROMPT="${BASE_CONTEXT}
+
+          ## User's Comment:
+          ${COMMENT_BODY}
+
+          ---
+
+          The user has posted a comment on this PR. Analyze what they're asking for:
+
+          - If they're asking a specific question, answer it directly and concisely
+          - If they're requesting a specific action, perform it
+          - Use your judgment to determine their intent from the comment
+          - Focus on conversational Q&A and actionable follow-up
+
+          IMPORTANT: To respond to this PR comment, use:
+          gh pr comment --body 'Your response here'"
+          fi
+
+          echo "prompt<<EOF" >> $GITHUB_OUTPUT
+          echo "$FULL_PROMPT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "✅ Crafted prompt for comment type: ${{ steps.extract-comment.outputs.comment_type }}"
+      # yamllint enable rule:line-length
+
+      - name: Run Claude response
+        uses: anthropics/claude-code-action@v1
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+          claude_args: |
+            --model opus
+            --allowedTools "mcp__github__add_comment_to_pending_review,
+            mcp__github__add_pull_request_review_comment,
+            mcp__github__create_issue_comment,
+            mcp__github__create_pending_pull_request_review,
+            mcp__github__get_file_contents,
+            mcp__github__get_pull_request_diff,
+            mcp__github__submit_pending_pull_request_review,
+            mcp__github_ci__get_ci_status,
+            mcp__github_ci__get_workflow_run_details,
+            mcp__github_ci__download_job_log,
+            mcp__github_comment__update_claude_comment,
+            mcp__github_inline_comment__create_inline_comment,
+            mcp__github_pulls__get_pull_request,
+            mcp__github_pulls__list_pull_request_files,
+            mcp__github_pulls__get_pull_request_diff,
+            Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
+          prompt: ${{ steps.craft-prompt.outputs.prompt }}
