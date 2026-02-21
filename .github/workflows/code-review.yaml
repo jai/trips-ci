@@ -661,8 +661,13 @@ jobs:
           TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
           ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
 
-          if [[ "$ACTION_REQUIRED_CHECKS" -eq 0 ]]; then
-            echo "::notice::PR #${PR_NUMBER} has no action_required checks (total checks: ${TOTAL_CHECKS}). Skipping empty commit."
+          TRIGGER_REASON=""
+          if [[ "$ACTION_REQUIRED_CHECKS" -gt 0 ]]; then
+            TRIGGER_REASON="action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS})"
+          elif [[ "$TOTAL_CHECKS" -eq 0 ]]; then
+            TRIGGER_REASON="no check-runs found on head SHA (likely missing ready_for_review trigger in caller workflows)"
+          else
+            echo "::notice::PR #${PR_NUMBER} has checks (${TOTAL_CHECKS}) but none are action_required. Skipping empty commit."
             exit 0
           fi
 
@@ -674,7 +679,7 @@ jobs:
             exit 0
           fi
 
-          echo "ℹ️ PR #${PR_NUMBER} has action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS}). Pushing one empty commit to trigger CI."
+          echo "ℹ️ PR #${PR_NUMBER}: ${TRIGGER_REASON}. Pushing one empty commit to trigger CI."
 
           git config user.name "Claude PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
