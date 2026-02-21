@@ -253,7 +253,8 @@ jobs:
         if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
         run: |
-          REVIEW_INSTRUCTIONS="Perform a comprehensive code review with the following focus areas:
+          REVIEW_INSTRUCTIONS=$(cat <<'REVIEW_INSTRUCTIONS_EOF'
+          Perform a comprehensive code review with the following focus areas:
 
             1. **Code Quality**
                - Clean code principles and best practices
@@ -348,7 +349,9 @@ jobs:
             <!-- /CLAUDE_READY_DECISION -->
 
             Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
-            Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes."
+            Set READY_FOR_REVIEW=false for request-changes or comment-only outcomes.
+          REVIEW_INSTRUCTIONS_EOF
+          )
 
           # Output the review instructions for use in next step
           echo "instructions<<EOF" >> $GITHUB_OUTPUT
