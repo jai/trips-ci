@@ -326,7 +326,7 @@ jobs:
 
             ## Review Thread Resolution (MANDATORY — zero unresolved threads before approve)
             Before finalizing, you MUST inspect ALL open review threads on this PR and resolve every single one.
-            Use `gh api graphql` with the `resolveReviewThread` mutation to resolve threads programmatically.
+            Use gh api graphql with the resolveReviewThread mutation to resolve threads programmatically.
 
             For each unresolved thread, apply ONE of these actions:
             1. **Valid suggestion** → Implement the fix, push a commit, reply confirming the fix, then RESOLVE the thread.
