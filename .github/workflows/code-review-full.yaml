@@ -3,7 +3,7 @@
 # Handles:
 #   1. pull_request events (opened, reopened, ready_for_review, synchronize, review_requested)
 #   2. /review slash command on PR issue_comment events
-# Emits structured outputs for downstream ready-automation workflow.
+# Includes post-review ready automation as an internal second job.
 
 ---
 name: Claude Full Review
@@ -508,3 +508,217 @@ jobs:
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
           echo "✅ Outputs prepared: ready=${READY}, found=${FOUND}, pr_number=${PR_NUMBER}, head_sha=${HEAD_SHA}"
+
+
+  ready-automation:
+    name: Draft→Ready + CI Trigger Automation
+    needs: review
+    if: ${{ needs.review.outputs.ready == 'true' && needs.review.outputs.found == 'true' }}
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+
+      - name: Fetch PR metadata
+        id: pr-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ needs.review.outputs.pr_number }}"
+          INPUT_HEAD_SHA="${{ needs.review.outputs.head_sha }}"
+
+          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
+
+          IS_DRAFT=$(printf '%s' "$PR_JSON" | jq -r '.draft')
+          HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
+          HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
+          CURRENT_HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
+
+          if [[ "$INPUT_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
+            echo "::notice::Input head_sha (${INPUT_HEAD_SHA}) differs from current PR head (${CURRENT_HEAD_SHA}); using current PR head SHA."
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "is_draft=${IS_DRAFT}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
+          echo "head_repo=${HEAD_REPO}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${CURRENT_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Unresolved review-thread gate (paginate all pages)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
+          OWNER="${{ github.repository_owner }}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+
+          QUERY='query($owner:String!, $repo:String!, $number:Int!, $after:String) {
+            repository(owner:$owner, name:$repo) {
+              pullRequest(number:$number) {
+                reviewThreads(first:100, after:$after) {
+                  nodes { isResolved }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }'
+
+          AFTER=""
+          PAGE=1
+          TOTAL_THREADS=0
+          UNRESOLVED_THREADS=0
+
+          while true; do
+            if [[ -n "$AFTER" ]]; then
+              RESPONSE=$(gh api graphql                 -f query="$QUERY"                 -f owner="$OWNER"                 -f repo="$REPO"                 -F number="$PR_NUMBER"                 -f after="$AFTER")
+            else
+              RESPONSE=$(gh api graphql                 -f query="$QUERY"                 -f owner="$OWNER"                 -f repo="$REPO"                 -F number="$PR_NUMBER")
+            fi
+
+            if [[ "$(printf '%s' "$RESPONSE" | jq -r '.data.repository.pullRequest == null')" == "true" ]]; then
+              echo "::error::Unable to load PR #${PR_NUMBER} review threads via GraphQL."
+              exit 1
+            fi
+
+            PAGE_TOTAL=$(printf '%s' "$RESPONSE" | jq '.data.repository.pullRequest.reviewThreads.nodes | length')
+            PAGE_UNRESOLVED=$(printf '%s' "$RESPONSE" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+            TOTAL_THREADS=$((TOTAL_THREADS + PAGE_TOTAL))
+            UNRESOLVED_THREADS=$((UNRESOLVED_THREADS + PAGE_UNRESOLVED))
+
+            HAS_NEXT=$(printf '%s' "$RESPONSE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+            if [[ "$HAS_NEXT" != "true" ]]; then
+              break
+            fi
+
+            AFTER=$(printf '%s' "$RESPONSE" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // empty')
+            if [[ -z "$AFTER" ]]; then
+              echo "::error::Pagination indicated hasNextPage=true but endCursor was empty (page ${PAGE})."
+              exit 1
+            fi
+
+            PAGE=$((PAGE + 1))
+          done
+
+          echo "Checked ${TOTAL_THREADS} review threads across ${PAGE} page(s)."
+
+          if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
+            echo "::error::READY_FOR_REVIEW=true but PR #${PR_NUMBER} still has ${UNRESOLVED_THREADS} unresolved review thread(s)."
+            exit 1
+          fi
+
+          echo "✅ No unresolved review threads remain."
+
+      - name: Draft → ready transition
+        if: steps.pr-meta.outputs.is_draft == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr ready "${{ steps.pr-meta.outputs.pr_number }}" --repo "${{ github.repository }}"
+
+      - name: Skip CI trigger commit for fork PRs
+        if: steps.pr-meta.outputs.head_repo != github.repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} head repo is ${{ steps.pr-meta.outputs.head_repo }}; skipping empty commit because branch is not local to target repo."
+
+      - name: Evaluate check runs for trigger-commit eligibility
+        id: checks
+        if: steps.pr-meta.outputs.head_repo == github.repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HEAD_SHA="${{ steps.pr-meta.outputs.head_sha }}"
+
+          CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
+          TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
+          ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
+
+          SHOULD_TRIGGER="false"
+          TRIGGER_REASON=""
+
+          if [[ "$ACTION_REQUIRED_CHECKS" -gt 0 ]]; then
+            SHOULD_TRIGGER="true"
+            TRIGGER_REASON="action_required checks (${ACTION_REQUIRED_CHECKS}/${TOTAL_CHECKS})"
+          elif [[ "$TOTAL_CHECKS" -eq 0 ]]; then
+            SHOULD_TRIGGER="true"
+            TRIGGER_REASON="no check-runs found on head SHA (likely missing ready_for_review trigger in caller workflows)"
+          fi
+
+          echo "total_checks=${TOTAL_CHECKS}" >> "$GITHUB_OUTPUT"
+          echo "action_required_checks=${ACTION_REQUIRED_CHECKS}" >> "$GITHUB_OUTPUT"
+          echo "should_trigger=${SHOULD_TRIGGER}" >> "$GITHUB_OUTPUT"
+          echo "trigger_reason=${TRIGGER_REASON}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip trigger commit when checks are already healthy
+        if: |
+          steps.pr-meta.outputs.head_repo == github.repository &&
+          steps.checks.outputs.should_trigger != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} has checks (${{ steps.checks.outputs.total_checks }}) and none are action_required. Skipping empty commit."
+
+      - name: Prevent duplicate trigger commit
+        id: duplicate-commit
+        if: |
+          steps.pr-meta.outputs.head_repo == github.repository &&
+          steps.checks.outputs.should_trigger == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
+
+          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate             | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
+
+          if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
+            echo "already_triggered=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_triggered=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip duplicate trigger commit
+        if: |
+          steps.pr-meta.outputs.head_repo == github.repository &&
+          steps.checks.outputs.should_trigger == 'true' &&
+          steps.duplicate-commit.outputs.already_triggered == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} already has a CI trigger empty commit. Skipping additional empty commit."
+
+      - name: Push empty commit to trigger CI checks
+        if: |
+          steps.pr-meta.outputs.head_repo == github.repository &&
+          steps.checks.outputs.should_trigger == 'true' &&
+          steps.duplicate-commit.outputs.already_triggered != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HEAD_REF="${{ steps.pr-meta.outputs.head_ref }}"
+
+          echo "ℹ️ PR #${{ steps.pr-meta.outputs.pr_number }}: ${{ steps.checks.outputs.trigger_reason }}. Pushing one empty commit to trigger CI."
+
+          git config user.name "Claude PR Assistant"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "$HEAD_REF"
+          git switch -C "$HEAD_REF" "origin/$HEAD_REF"
+          git commit --allow-empty -m "ci: trigger checks after claude ready decision"
+          git push origin "HEAD:$HEAD_REF"
