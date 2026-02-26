@@ -199,7 +199,12 @@ jobs:
           - If they're requesting a change, evaluate and respond
           - Focus on the specific code context they're commenting on
           - Be concise and directly relevant to their comment
-          - Use the in_reply_to parameter to create a threaded reply"
+          - Use the in_reply_to parameter to create a threaded reply
+
+          CONVERSATIONAL-ONLY RULE (MANDATORY):
+          - Never approve a PR and never request changes in this workflow.
+          - Never run gh pr review --approve or gh pr review --request-changes.
+          - Only post conversational replies/comments relevant to the user's message."
           else
             FULL_PROMPT="${BASE_CONTEXT}
 
@@ -214,6 +219,11 @@ jobs:
           - If they're requesting a specific action, perform it
           - Use your judgment to determine their intent from the comment
           - Focus on conversational Q&A and actionable follow-up
+
+          CONVERSATIONAL-ONLY RULE (MANDATORY):
+          - Never approve a PR and never request changes in this workflow.
+          - Never run gh pr review --approve or gh pr review --request-changes.
+          - Only post conversational replies/comments relevant to the user's message.
 
           IMPORTANT: To respond to this PR comment, use:
           gh pr comment --body 'Your response here'"
@@ -237,10 +247,8 @@ jobs:
             --allowedTools "mcp__github__add_comment_to_pending_review,
             mcp__github__add_pull_request_review_comment,
             mcp__github__create_issue_comment,
-            mcp__github__create_pending_pull_request_review,
             mcp__github__get_file_contents,
             mcp__github__get_pull_request_diff,
-            mcp__github__submit_pending_pull_request_review,
             mcp__github_ci__get_ci_status,
             mcp__github_ci__get_workflow_run_details,
             mcp__github_ci__download_job_log,

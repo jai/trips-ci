@@ -3,7 +3,7 @@
 # Handles:
 #   1. pull_request events (opened, reopened, ready_for_review, synchronize, review_requested)
 #   2. /review slash command on PR issue_comment events
-# Includes post-review ready automation as an internal second job.
+# CI owns final approve/request-changes orchestration.
 
 ---
 name: Claude Full Review
@@ -16,18 +16,37 @@ on:
       CLAUDE_REVIEW_GH_TOKEN:
         required: true
     outputs:
-      ready:
-        description: "Parsed READY_FOR_REVIEW value (true/false)"
-        value: ${{ jobs.review.outputs.ready }}
-      found:
-        description: "Whether a structured marker or fallback review state was found"
-        value: ${{ jobs.review.outputs.found }}
+      decision_found:
+        description: "Whether a valid CLAUDE_REVIEW_DECISION marker was found"
+        value: ${{ jobs.review.outputs.decision_found }}
+      decision:
+        description: "Parsed decision value (APPROVE|REQUEST_CHANGES)"
+        value: ${{ jobs.review.outputs.decision }}
+      blocker:
+        description: "Parsed BLOCKER value (for REQUEST_CHANGES)"
+        value: ${{ jobs.review.outputs.blocker }}
+      next_action:
+        description: "Parsed NEXT_ACTION value (for REQUEST_CHANGES)"
+        value: ${{ jobs.review.outputs.next_action }}
       pr_number:
         description: "PR number processed by this run"
         value: ${{ jobs.review.outputs.pr_number }}
       head_sha:
         description: "Current PR head SHA"
         value: ${{ jobs.review.outputs.head_sha }}
+      total_threads:
+        description: "Total review thread count observed during orchestration"
+        value: ${{ jobs.review-orchestration.outputs.total_threads }}
+      unresolved_threads:
+        description: "Unresolved review thread count observed during orchestration"
+        value: ${{ jobs.review-orchestration.outputs.unresolved_threads }}
+      # Backward-compatible aliases
+      found:
+        description: "Alias of decision_found"
+        value: ${{ jobs.review.outputs.found }}
+      ready:
+        description: "Alias: true when decision=APPROVE"
+        value: ${{ jobs.review.outputs.ready }}
 
 permissions:
   contents: read
@@ -44,10 +63,15 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
       GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
     outputs:
-      ready: ${{ steps.set-outputs.outputs.ready }}
-      found: ${{ steps.set-outputs.outputs.found }}
+      decision_found: ${{ steps.set-outputs.outputs.decision_found }}
+      decision: ${{ steps.set-outputs.outputs.decision }}
+      blocker: ${{ steps.set-outputs.outputs.blocker }}
+      next_action: ${{ steps.set-outputs.outputs.next_action }}
       pr_number: ${{ steps.set-outputs.outputs.pr_number }}
       head_sha: ${{ steps.set-outputs.outputs.head_sha }}
+      # Backward-compatible aliases
+      found: ${{ steps.set-outputs.outputs.found }}
+      ready: ${{ steps.set-outputs.outputs.ready }}
     if: |
       (
         github.event_name == 'pull_request' &&
@@ -208,9 +232,9 @@ jobs:
             - For every blocking issue you find, you MUST implement the fix directly on this PR branch and push commit(s).
             - Iterate review -> fix -> verify until no blocking issues remain.
             - Do NOT delegate fixes to Copilot or ask another agent to implement them.
-            - You MUST resolve ALL review threads before approving. See the Review Thread Resolution section below.
+            - You MUST resolve ALL review threads before choosing DECISION=APPROVE. See the Review Thread Resolution section below.
             - For each thread: implement valid suggestions, dismiss false positives with rationale, then resolve.
-            - You may use REQUEST_CHANGES only when hard-blocked by an external constraint you cannot resolve in-workflow.
+            - You may choose DECISION=REQUEST_CHANGES only when hard-blocked by an external constraint you cannot resolve in-workflow.
               Hard-block examples:
               - no permission/policy to push to the PR branch
               - unresolved merge conflict/rebase that cannot be completed in this workflow
@@ -220,30 +244,7 @@ jobs:
 
             Use inline comments ONLY for issues that need to be fixed or changed.
             Do NOT leave inline comments for praise or positive observations.
-            Post a final summary review using 'gh pr comment'.
-
-            ## Approval Decision
-
-            After completing your review, you MUST make an approval decision:
-
-            **APPROVE the PR** if ALL of these conditions are met:
-            - No security vulnerabilities found
-            - No critical bugs or logic errors
-            - Code follows project conventions
-            - Tests pass (if applicable)
-
-            To approve, run: gh pr review --approve --body 'LGTM - Code review passed. [brief summary of what was reviewed]'
-
-            **REQUEST CHANGES** only if hard-blocked after attempting direct fixes:
-            - You cannot push required changes from this workflow
-            - You cannot safely resolve merge conflicts/rebase in this workflow
-            - A required external dependency is unavailable
-            - Human product/owner decision is required before implementation
-
-            To request changes, run:
-            gh pr review --request-changes --body 'BLOCKED: [exact blocker]. Next action: [specific next step].'
-
-            IMPORTANT: Always make an explicit approval decision. Do not leave the PR without approving or requesting changes.
+            Post a final summary comment using 'gh pr comment'.
 
             ## Review Thread Resolution (MANDATORY — zero unresolved threads before approve)
             Before finalizing, you MUST inspect ALL open review threads on this PR and resolve every single one.
@@ -257,19 +258,23 @@ jobs:
 
             Escape hatch (rare — use sparingly):
             5. **Genuinely blocked** (needs human product decision, external dependency, or repo permission you lack) →
-               Reply with BLOCKED: [exact reason] in the thread. Do NOT resolve. Do NOT set READY_FOR_REVIEW=true.
+               Reply with BLOCKED: [exact reason] in the thread. Do NOT resolve.
 
-            The rule is simple: **zero unresolved threads = can approve. Any unresolved thread = cannot approve.**
-            The post-review automation will hard-fail if READY_FOR_REVIEW=true but unresolved threads remain.
+            The rule is simple: **zero unresolved threads = can choose DECISION=APPROVE. Any unresolved thread = must not choose DECISION=APPROVE.**
 
             ## Structured Decision Marker (required)
             At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
-            <!-- CLAUDE_READY_DECISION -->
-            READY_FOR_REVIEW=true|false
-            <!-- /CLAUDE_READY_DECISION -->
+            <!-- CLAUDE_REVIEW_DECISION -->
+            DECISION=APPROVE|REQUEST_CHANGES
+            BLOCKER=<required when DECISION=REQUEST_CHANGES>
+            NEXT_ACTION=<required when DECISION=REQUEST_CHANGES>
+            <!-- /CLAUDE_REVIEW_DECISION -->
 
-            Set READY_FOR_REVIEW=true only when your final review decision is APPROVE.
-            Set READY_FOR_REVIEW=false for request-changes outcomes."
+            Rules:
+            - Always emit DECISION.
+            - Include BLOCKER and NEXT_ACTION only when DECISION=REQUEST_CHANGES.
+            - Do NOT run 'gh pr review --approve' or 'gh pr review --request-changes'.
+            - CI workflow will submit the final review action after parsing this marker."
 
           echo "instructions<<EOF" >> "$GITHUB_OUTPUT"
           echo "$REVIEW_INSTRUCTIONS" >> "$GITHUB_OUTPUT"
@@ -285,9 +290,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # decision_required=true always in this reusable full-review workflow
-          DECISION_REQUIRED="true"
 
           REVIEW_INSTRUCTIONS=$(cat <<'REVIEW_EOF'
           ${{ steps.review-instructions.outputs.instructions }}
@@ -326,7 +328,6 @@ jobs:
           echo "prompt<<EOF" >> "$GITHUB_OUTPUT"
           echo "$FULL_PROMPT" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "decision_required=$DECISION_REQUIRED" >> "$GITHUB_OUTPUT"
 
           echo "✅ Crafted full-review prompt"
 
@@ -383,10 +384,8 @@ jobs:
             --allowedTools "mcp__github__add_comment_to_pending_review,
             mcp__github__add_pull_request_review_comment,
             mcp__github__create_issue_comment,
-            mcp__github__create_pending_pull_request_review,
             mcp__github__get_file_contents,
             mcp__github__get_pull_request_diff,
-            mcp__github__submit_pending_pull_request_review,
             mcp__github_ci__get_ci_status,
             mcp__github_ci__get_workflow_run_details,
             mcp__github_ci__download_job_log,
@@ -398,84 +397,99 @@ jobs:
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
 
-      - name: Parse structured ready decision
-        id: parse-ready-decision
+      - name: Parse structured review decision
+        id: parse-review-decision
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.extract-context.outputs.has_review_trigger == 'true' &&
-          steps.craft-prompt.outputs.decision_required == 'true'
+          steps.extract-context.outputs.has_review_trigger == 'true'
         shell: bash
         run: |
           set -euo pipefail
+
+          trim() {
+            sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+          }
 
           PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
           RUN_STARTED_AT="${{ steps.review-started-at.outputs.started_at }}"
           AUTOMATION_LOGIN=$(gh api user --jq '.login')
 
           COMMENTS_JSON=$(gh api repos/${{ github.repository }}/issues/${PR_NUMBER}/comments --paginate)
-          DECISION_BODY=$(printf '%s' "$COMMENTS_JSON" | jq -r --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
-            [
-              .[]
-              | select(.user.login == $automation_login)
-              | select(.created_at >= $run_started_at)
-              | select(.body | contains("<!-- CLAUDE_READY_DECISION -->"))
-            ]
-            | sort_by(.created_at)
-            | last
-            | .body // empty
-          ')
 
-          if [[ -z "$DECISION_BODY" ]]; then
-            REVIEWS_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews --paginate)
-            REVIEW_STATE=$(printf '%s' "$REVIEWS_JSON" | jq -r --arg run_started_at "$RUN_STARTED_AT" --arg automation_login "$AUTOMATION_LOGIN" '
+          mapfile -t CANDIDATES < <(
+            printf '%s' "$COMMENTS_JSON" | jq -r \
+              --arg run_started_at "$RUN_STARTED_AT" \
+              --arg automation_login "$AUTOMATION_LOGIN" '
               [
                 .[]
                 | select(.user.login == $automation_login)
-                | select(.submitted_at != null and .submitted_at >= $run_started_at)
+                | select(.created_at >= $run_started_at)
+                | select(.body | contains("<!-- CLAUDE_REVIEW_DECISION -->"))
+                | select(.body | contains("<!-- /CLAUDE_REVIEW_DECISION -->"))
               ]
-              | sort_by(.submitted_at)
-              | last
-              | .state // empty
-            ' | tr '[:upper:]' '[:lower:]')
+              | sort_by(.created_at)
+              | reverse
+              | .[]
+              | @base64
+            '
+          )
 
-            case "$REVIEW_STATE" in
-              approved)
-                echo "found=true" >> "$GITHUB_OUTPUT"
-                echo "ready=true" >> "$GITHUB_OUTPUT"
-                echo "✅ Structured marker missing; falling back to review state APPROVED."
-                exit 0
+          DECISION_FOUND="false"
+          DECISION=""
+          BLOCKER=""
+          NEXT_ACTION=""
+
+          for entry in "${CANDIDATES[@]}"; do
+            COMMENT_BODY=$(printf '%s' "$entry" | base64 -d | jq -r '.body // empty')
+
+            MARKER_BLOCK=$(printf '%s\n' "$COMMENT_BODY" | awk '
+              /<!-- CLAUDE_REVIEW_DECISION -->/ {in_block=1; next}
+              /<!-- \/CLAUDE_REVIEW_DECISION -->/ {in_block=0}
+              in_block {print}
+            ')
+
+            CANDIDATE_DECISION=$(printf '%s\n' "$MARKER_BLOCK" | awk '/^DECISION=/{sub(/^DECISION=/,""); print; exit}' | tr -d '\r' | trim)
+            CANDIDATE_BLOCKER=$(printf '%s\n' "$MARKER_BLOCK" | awk '/^BLOCKER=/{sub(/^BLOCKER=/,""); print; exit}' | tr -d '\r' | trim)
+            CANDIDATE_NEXT_ACTION=$(printf '%s\n' "$MARKER_BLOCK" | awk '/^NEXT_ACTION=/{sub(/^NEXT_ACTION=/,""); print; exit}' | tr -d '\r' | trim)
+
+            case "$CANDIDATE_DECISION" in
+              APPROVE)
+                DECISION_FOUND="true"
+                DECISION="APPROVE"
+                BLOCKER=""
+                NEXT_ACTION=""
+                break
                 ;;
-              changes_requested|commented|dismissed)
-                echo "found=true" >> "$GITHUB_OUTPUT"
-                echo "ready=false" >> "$GITHUB_OUTPUT"
-                echo "ℹ️ Structured marker missing; review state is ${REVIEW_STATE}."
-                exit 0
+              REQUEST_CHANGES)
+                if [[ -n "$CANDIDATE_BLOCKER" && -n "$CANDIDATE_NEXT_ACTION" ]]; then
+                  DECISION_FOUND="true"
+                  DECISION="REQUEST_CHANGES"
+                  BLOCKER="$CANDIDATE_BLOCKER"
+                  NEXT_ACTION="$CANDIDATE_NEXT_ACTION"
+                  break
+                fi
                 ;;
               *)
-                echo "found=false" >> "$GITHUB_OUTPUT"
-                echo "ready=false" >> "$GITHUB_OUTPUT"
-                echo "::notice::No structured ready marker or qualifying review state found after ${RUN_STARTED_AT}."
-                exit 0
                 ;;
             esac
+          done
+
+          echo "decision_found=${DECISION_FOUND}" >> "$GITHUB_OUTPUT"
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
+
+          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BLOCKER" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NEXT_ACTION" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          if [[ "$DECISION_FOUND" == "true" ]]; then
+            echo "✅ Parsed decision marker: ${DECISION}"
+          else
+            echo "::warning::No valid CLAUDE_REVIEW_DECISION marker found after ${RUN_STARTED_AT}; failing closed (no workflow-submitted review action)."
           fi
-
-          READY_VALUE=$(printf '%s\n' "$DECISION_BODY" \
-            | awk -F= '/^READY_FOR_REVIEW=/{print $2; exit}' \
-            | tr '[:upper:]' '[:lower:]')
-
-          case "$READY_VALUE" in
-            true|false)
-              echo "found=true" >> "$GITHUB_OUTPUT"
-              echo "ready=$READY_VALUE" >> "$GITHUB_OUTPUT"
-              echo "✅ Parsed READY_FOR_REVIEW=$READY_VALUE"
-              ;;
-            *)
-              echo "found=false" >> "$GITHUB_OUTPUT"
-              echo "ready=false" >> "$GITHUB_OUTPUT"
-              echo "::warning::Structured decision marker was present but invalid. Expected READY_FOR_REVIEW=true|false."
-              ;;
-          esac
 
       - name: Set reusable workflow outputs
         id: set-outputs
@@ -484,42 +498,64 @@ jobs:
         run: |
           set -euo pipefail
 
-          READY="false"
-          FOUND="false"
+          DECISION_FOUND="false"
+          DECISION=""
+          BLOCKER=""
+          NEXT_ACTION=""
           PR_NUMBER=""
           HEAD_SHA=""
+          FOUND_ALIAS="false"
+          READY_ALIAS="false"
 
           if [[ "${{ steps.extract-pr.outputs.has_pr || 'false' }}" == "true" ]]; then
             PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
             HEAD_SHA="${{ steps.fetch-pr.outputs.head_sha }}"
           fi
 
-          if [[ "${{ steps.parse-ready-decision.outputs.found || 'false' }}" == "true" ]]; then
-            FOUND="true"
+          if [[ "${{ steps.parse-review-decision.outputs.decision_found || 'false' }}" == "true" ]]; then
+            DECISION_FOUND="true"
+            FOUND_ALIAS="true"
+            DECISION="${{ steps.parse-review-decision.outputs.decision }}"
+            BLOCKER="${{ steps.parse-review-decision.outputs.blocker }}"
+            NEXT_ACTION="${{ steps.parse-review-decision.outputs.next_action }}"
+            if [[ "$DECISION" == "APPROVE" ]]; then
+              READY_ALIAS="true"
+            fi
           fi
 
-          if [[ "${{ steps.parse-ready-decision.outputs.ready || 'false' }}" == "true" ]]; then
-            READY="true"
-          fi
+          echo "decision_found=${DECISION_FOUND}" >> "$GITHUB_OUTPUT"
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
 
-          echo "ready=${READY}" >> "$GITHUB_OUTPUT"
-          echo "found=${FOUND}" >> "$GITHUB_OUTPUT"
+          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BLOCKER" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NEXT_ACTION" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
-          echo "✅ Outputs prepared: ready=${READY}, found=${FOUND}, pr_number=${PR_NUMBER}, head_sha=${HEAD_SHA}"
+          # Backward-compatible aliases
+          echo "found=${FOUND_ALIAS}" >> "$GITHUB_OUTPUT"
+          echo "ready=${READY_ALIAS}" >> "$GITHUB_OUTPUT"
 
+          echo "✅ Outputs prepared: decision_found=${DECISION_FOUND}, decision=${DECISION}, pr_number=${PR_NUMBER}, head_sha=${HEAD_SHA}"
 
-  ready-automation:
-    name: Draft→Ready + CI Trigger Automation
+  review-orchestration:
+    name: Review Orchestration
     needs: review
-    if: ${{ needs.review.outputs.ready == 'true' && needs.review.outputs.found == 'true' }}
+    if: ${{ needs.review.outputs.decision_found == 'true' }}
     runs-on: ubicloud-standard-2
     timeout-minutes: 15
     permissions:
       contents: write
       pull-requests: write
       actions: read
+    outputs:
+      total_threads: ${{ steps.thread-counts.outputs.total_threads }}
+      unresolved_threads: ${{ steps.thread-counts.outputs.unresolved_threads }}
     env:
       GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
       GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
@@ -537,6 +573,7 @@ jobs:
 
           PR_NUMBER="${{ needs.review.outputs.pr_number }}"
           INPUT_HEAD_SHA="${{ needs.review.outputs.head_sha }}"
+          DECISION="${{ needs.review.outputs.decision }}"
 
           PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
 
@@ -550,12 +587,22 @@ jobs:
           fi
 
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
           echo "is_draft=${IS_DRAFT}" >> "$GITHUB_OUTPUT"
           echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
           echo "head_repo=${HEAD_REPO}" >> "$GITHUB_OUTPUT"
           echo "head_sha=${CURRENT_HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Unresolved review-thread gate (paginate all pages)
+          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ needs.review.outputs.blocker }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ needs.review.outputs.next_action }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Compute unresolved review-thread counts (paginate all pages)
+        id: thread-counts
         shell: bash
         run: |
           set -euo pipefail
@@ -582,9 +629,18 @@ jobs:
 
           while true; do
             if [[ -n "$AFTER" ]]; then
-              RESPONSE=$(gh api graphql                 -f query="$QUERY"                 -f owner="$OWNER"                 -f repo="$REPO"                 -F number="$PR_NUMBER"                 -f after="$AFTER")
+              RESPONSE=$(gh api graphql \
+                -f query="$QUERY" \
+                -f owner="$OWNER" \
+                -f repo="$REPO" \
+                -F number="$PR_NUMBER" \
+                -f after="$AFTER")
             else
-              RESPONSE=$(gh api graphql                 -f query="$QUERY"                 -f owner="$OWNER"                 -f repo="$REPO"                 -F number="$PR_NUMBER")
+              RESPONSE=$(gh api graphql \
+                -f query="$QUERY" \
+                -f owner="$OWNER" \
+                -f repo="$REPO" \
+                -F number="$PR_NUMBER")
             fi
 
             if [[ "$(printf '%s' "$RESPONSE" | jq -r '.data.repository.pullRequest == null')" == "true" ]]; then
@@ -612,24 +668,40 @@ jobs:
             PAGE=$((PAGE + 1))
           done
 
-          echo "Checked ${TOTAL_THREADS} review threads across ${PAGE} page(s)."
+          echo "total_threads=${TOTAL_THREADS}" >> "$GITHUB_OUTPUT"
+          echo "unresolved_threads=${UNRESOLVED_THREADS}" >> "$GITHUB_OUTPUT"
+
+          echo "Checked ${TOTAL_THREADS} review threads across ${PAGE} page(s); unresolved=${UNRESOLVED_THREADS}."
+
+      - name: Enforce approval precondition (unresolved threads must be zero)
+        if: steps.pr-meta.outputs.decision == 'APPROVE'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
+          UNRESOLVED_THREADS="${{ steps.thread-counts.outputs.unresolved_threads }}"
 
           if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
-            echo "::error::READY_FOR_REVIEW=true but PR #${PR_NUMBER} still has ${UNRESOLVED_THREADS} unresolved review thread(s)."
+            echo "::error::DECISION=APPROVE requires unresolved_threads=0, but PR #${PR_NUMBER} has ${UNRESOLVED_THREADS} unresolved review thread(s)."
             exit 1
           fi
 
-          echo "✅ No unresolved review threads remain."
+          echo "✅ Approval precondition satisfied: unresolved_threads=0"
 
       - name: Draft → ready transition
-        if: steps.pr-meta.outputs.is_draft == 'true'
+        if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
+          steps.pr-meta.outputs.is_draft == 'true'
         shell: bash
         run: |
           set -euo pipefail
           gh pr ready "${{ steps.pr-meta.outputs.pr_number }}" --repo "${{ github.repository }}"
 
       - name: Skip CI trigger commit for fork PRs
-        if: steps.pr-meta.outputs.head_repo != github.repository
+        if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
+          steps.pr-meta.outputs.head_repo != github.repository
         shell: bash
         run: |
           set -euo pipefail
@@ -637,7 +709,9 @@ jobs:
 
       - name: Evaluate check runs for trigger-commit eligibility
         id: checks
-        if: steps.pr-meta.outputs.head_repo == github.repository
+        if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
+          steps.pr-meta.outputs.head_repo == github.repository
         shell: bash
         run: |
           set -euo pipefail
@@ -666,6 +740,7 @@ jobs:
 
       - name: Skip trigger commit when checks are already healthy
         if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger != 'true'
         shell: bash
@@ -676,6 +751,7 @@ jobs:
       - name: Prevent duplicate trigger commit
         id: duplicate-commit
         if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger == 'true'
         shell: bash
@@ -684,7 +760,8 @@ jobs:
 
           PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
 
-          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate             | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after"))] | length')
+          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
+            | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after claude review decision"))] | length')
 
           if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
             echo "already_triggered=true" >> "$GITHUB_OUTPUT"
@@ -694,6 +771,7 @@ jobs:
 
       - name: Skip duplicate trigger commit
         if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger == 'true' &&
           steps.duplicate-commit.outputs.already_triggered == 'true'
@@ -704,6 +782,7 @@ jobs:
 
       - name: Push empty commit to trigger CI checks
         if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger == 'true' &&
           steps.duplicate-commit.outputs.already_triggered != 'true'
@@ -720,5 +799,31 @@ jobs:
 
           git fetch origin "$HEAD_REF"
           git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after claude ready decision"
+          git commit --allow-empty -m "ci: trigger checks after claude review decision"
           git push origin "HEAD:$HEAD_REF"
+
+      - name: Submit workflow-owned APPROVED review
+        if: steps.pr-meta.outputs.decision == 'APPROVE'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
+
+          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
+            --body "CI approval: Claude decision APPROVE and unresolved review threads = 0."
+
+      - name: Submit workflow-owned REQUEST_CHANGES review
+        if: steps.pr-meta.outputs.decision == 'REQUEST_CHANGES'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
+          BLOCKER="${{ steps.pr-meta.outputs.blocker }}"
+          NEXT_ACTION="${{ steps.pr-meta.outputs.next_action }}"
+
+          REVIEW_BODY=$(printf 'BLOCKED: %s\nNext action: %s' "$BLOCKER" "$NEXT_ACTION")
+
+          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes \
+            --body "$REVIEW_BODY"
