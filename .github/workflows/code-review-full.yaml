@@ -488,7 +488,8 @@ jobs:
           if [[ "$DECISION_FOUND" == "true" ]]; then
             echo "✅ Parsed decision marker: ${DECISION}"
           else
-            echo "::warning::No valid CLAUDE_REVIEW_DECISION marker found after ${RUN_STARTED_AT}; failing closed (no workflow-submitted review action)."
+            echo "::error::No valid CLAUDE_REVIEW_DECISION marker found after ${RUN_STARTED_AT}; failing closed (no workflow-submitted review action)."
+            exit 1
           fi
 
       - name: Set reusable workflow outputs
