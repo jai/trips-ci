@@ -1,0 +1,96 @@
+name: PR Image Check
+
+on:
+  workflow_call:
+    secrets:
+      GH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-images:
+    name: Validate PR Images
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Check image URLs in PR body
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Fetch PR body
+          BODY=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.body // ""')
+
+          if [ -z "$BODY" ]; then
+            echo "ℹ️ No PR body found — skipping"
+            exit 0
+          fi
+
+          # Extract image URLs (two passes, deduplicated):
+          # 1) Markdown image syntax: ![alt](url)
+          # 2) Raw URLs ending in image extensions
+          URLS=$(
+            {
+              echo "$BODY" | grep -oP '!\[[^\]]*\]\(\K[^\)]+' || true
+              echo "$BODY" | grep -oP 'https?://[^\s\)"<>]+\.(?:png|jpg|jpeg|gif|webp|svg)(?=[\s\)"<>]|$)' || true
+            } | sort -u
+          )
+
+          if [ -z "$URLS" ]; then
+            echo "ℹ️ No images in PR body"
+            exit 0
+          fi
+
+          echo "🔍 Found image URLs:"
+          echo "$URLS"
+          echo ""
+
+          FAILURES=""
+          CHECKED=0
+          FAILED=0
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            CHECKED=$((CHECKED + 1))
+
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -L --max-time 10 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "$url" 2>/dev/null || echo "000")
+
+            if [[ "$HTTP_CODE" =~ ^2[0-9]{2}$ ]]; then
+              echo "  ✅ ${HTTP_CODE} — ${url}"
+            else
+              echo "  ❌ ${HTTP_CODE} — ${url}"
+              FAILED=$((FAILED + 1))
+              FAILURES="${FAILURES}\n- \`${url}\` → HTTP ${HTTP_CODE}"
+            fi
+          done <<< "$URLS"
+
+          echo ""
+          echo "Checked ${CHECKED} URL(s): ${FAILED} broken"
+
+          if [ "$FAILED" -gt 0 ]; then
+            COMMENT_BODY=$(cat <<EOF
+          ⚠️ **Broken image(s) in PR description**
+
+          The following image URL(s) returned non-2xx status codes:
+
+          $(echo -e "$FAILURES")
+
+          Please update or remove these URLs before merging.
+          EOF
+          )
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              -f body="$COMMENT_BODY" --silent
+            echo ""
+            echo "❌ Posted comment with broken URLs — failing check"
+            exit 1
+          fi
+
+          echo "✅ All ${CHECKED} image URL(s) resolved successfully"
