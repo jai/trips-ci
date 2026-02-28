@@ -10,6 +10,12 @@ name: Claude Full Review
 
 on:
   workflow_call:
+    inputs:
+      custom_review_instructions:
+        description: "Optional additional review instructions prepended to the default review prompt (e.g. VISION.md alignment checks)"
+        type: string
+        required: false
+        default: ""
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -296,6 +302,13 @@ jobs:
           REVIEW_EOF
           )
 
+          CUSTOM_INSTRUCTIONS=$(cat <<'CUSTOM_EOF'
+          ${{ inputs.custom_review_instructions }}
+          CUSTOM_EOF
+          )
+          # Trim whitespace-only custom instructions to empty
+          CUSTOM_INSTRUCTIONS=$(printf '%s' "$CUSTOM_INSTRUCTIONS" | sed '/^[[:space:]]*$/d')
+
           BASE_CONTEXT="REPO: ${{ github.repository }}
           PR NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
 
@@ -314,7 +327,10 @@ jobs:
           Additional user instructions from /review (if any):
           ${{ steps.extract-context.outputs.slash_args }}
 
-          ${REVIEW_INSTRUCTIONS}
+          ${CUSTOM_INSTRUCTIONS:+## Project-Specific Review Criteria
+          ${CUSTOM_INSTRUCTIONS}
+
+          }${REVIEW_INSTRUCTIONS}
 
           IMPORTANT: Post your final summary as a PR comment with:
           gh pr comment --body 'Your response here'"
@@ -322,6 +338,10 @@ jobs:
             FULL_PROMPT="${BASE_CONTEXT}
 
           This PR event was triggered by action: ${{ github.event.action }}.
+          ${CUSTOM_INSTRUCTIONS:+
+          ## Project-Specific Review Criteria
+          ${CUSTOM_INSTRUCTIONS}
+          }
           ${REVIEW_INSTRUCTIONS}"
           fi
 
