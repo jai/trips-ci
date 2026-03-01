@@ -909,5 +909,18 @@ jobs:
 
           REVIEW_BODY=$(printf 'BLOCKED: %s\nNext action: %s' "$BLOCKER" "$NEXT_ACTION")
 
-          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes \
-            --body "$REVIEW_BODY"
+          set +e
+          REVIEW_OUTPUT=$(gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes \
+            --body "$REVIEW_BODY" 2>&1)
+          REVIEW_EXIT=$?
+          set -e
+
+          if [[ "$REVIEW_EXIT" -ne 0 ]]; then
+            if printf '%s' "$REVIEW_OUTPUT" | grep -qi "request changes on your own pull request"; then
+              echo "::notice::Request-changes skipped gracefully: workflow identity cannot request changes on its own pull request."
+              exit 0
+            fi
+
+            printf '%s\n' "$REVIEW_OUTPUT" >&2
+            exit "$REVIEW_EXIT"
+          fi
