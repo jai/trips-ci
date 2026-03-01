@@ -582,6 +582,14 @@ jobs:
           HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
           HEAD_REPO=$(printf '%s' "$PR_JSON" | jq -r '.head.repo.full_name')
           CURRENT_HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
+          PR_AUTHOR_LOGIN=$(printf '%s' "$PR_JSON" | jq -r '.user.login')
+          AUTOMATION_LOGIN=$(gh api user --jq '.login')
+
+          CAN_SUBMIT_APPROVAL="true"
+          if [[ "$DECISION" == "APPROVE" && "$AUTOMATION_LOGIN" == "$PR_AUTHOR_LOGIN" ]]; then
+            CAN_SUBMIT_APPROVAL="false"
+            echo "::notice::PR #${PR_NUMBER} is authored by @${PR_AUTHOR_LOGIN} and workflow identity is also @${AUTOMATION_LOGIN}; skipping workflow-owned approval to avoid self-approval failure."
+          fi
 
           if [[ "$INPUT_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
             echo "::notice::Input head_sha (${INPUT_HEAD_SHA}) differs from current PR head (${CURRENT_HEAD_SHA}); using current PR head SHA."
@@ -593,6 +601,9 @@ jobs:
           echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
           echo "head_repo=${HEAD_REPO}" >> "$GITHUB_OUTPUT"
           echo "head_sha=${CURRENT_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "pr_author_login=${PR_AUTHOR_LOGIN}" >> "$GITHUB_OUTPUT"
+          echo "automation_login=${AUTOMATION_LOGIN}" >> "$GITHUB_OUTPUT"
+          echo "can_submit_approval=${CAN_SUBMIT_APPROVAL}" >> "$GITHUB_OUTPUT"
 
           echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
           echo "${{ needs.review.outputs.blocker }}" >> "$GITHUB_OUTPUT"
@@ -803,16 +814,40 @@ jobs:
           git commit --allow-empty -m "ci: trigger checks after claude review decision"
           git push origin "HEAD:$HEAD_REF"
 
+      - name: Skip workflow-owned APPROVED review for self-authored PR
+        if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
+          steps.pr-meta.outputs.can_submit_approval != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice::Skipping workflow-owned approval for PR #${{ steps.pr-meta.outputs.pr_number }} because @${{ steps.pr-meta.outputs.automation_login }} cannot approve their own pull request (@${{ steps.pr-meta.outputs.pr_author_login }})."
+
       - name: Submit workflow-owned APPROVED review
-        if: steps.pr-meta.outputs.decision == 'APPROVE'
+        if: |
+          steps.pr-meta.outputs.decision == 'APPROVE' &&
+          steps.pr-meta.outputs.can_submit_approval == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
 
-          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
-            --body "CI approval: Claude decision APPROVE and unresolved review threads = 0."
+          set +e
+          REVIEW_OUTPUT=$(gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
+            --body "CI approval: Claude decision APPROVE and unresolved review threads = 0." 2>&1)
+          REVIEW_EXIT=$?
+          set -e
+
+          if [[ "$REVIEW_EXIT" -ne 0 ]]; then
+            if printf '%s' "$REVIEW_OUTPUT" | grep -qi "approve your own pull request"; then
+              echo "::notice::Approval skipped gracefully: workflow identity cannot approve its own pull request."
+              exit 0
+            fi
+
+            printf '%s\n' "$REVIEW_OUTPUT" >&2
+            exit "$REVIEW_EXIT"
+          fi
 
       - name: Submit workflow-owned REQUEST_CHANGES review
         if: steps.pr-meta.outputs.decision == 'REQUEST_CHANGES'
