@@ -391,7 +391,9 @@ jobs:
           echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude full review
+        id: run-claude
         uses: anthropics/claude-code-action@v1
+        continue-on-error: true
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.extract-context.outputs.has_review_trigger == 'true'
@@ -416,6 +418,32 @@ jobs:
             mcp__github_pulls__get_pull_request_diff,
             Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
           prompt: ${{ steps.craft-prompt.outputs.prompt }}
+
+      - name: Fallback decision marker when Claude execution crashes
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.extract-context.outputs.has_review_trigger == 'true' &&
+          steps.run-claude.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          BLOCKER="Claude full-review execution crashed before emitting a structured decision marker (see run log: ${RUN_URL})."
+          NEXT_ACTION="Re-run /review on this PR after Claude service recovers; if persistent, investigate the failing run logs and workflow inputs."
+
+          FALLBACK_MARKER=$(printf '%s\n' \
+            "<!-- CLAUDE_REVIEW_DECISION -->" \
+            "DECISION=REQUEST_CHANGES" \
+            "BLOCKER=${BLOCKER}" \
+            "NEXT_ACTION=${NEXT_ACTION}" \
+            "<!-- /CLAUDE_REVIEW_DECISION -->")
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$FALLBACK_MARKER"
+
+          echo "::warning::Claude action failed; posted fail-closed REQUEST_CHANGES marker so orchestration can continue without a red required check."
 
       - name: Parse structured review decision
         id: parse-review-decision
