@@ -1,15 +1,31 @@
-# Claude conversational/inline response workflow
+# Codex conversational/inline response workflow
 # Extracted from code-review.yaml for reusable routing
 
 ---
-name: Claude PR Assistant Respond
+name: Codex PR Assistant Respond
 
 on:
   workflow_call:
+    inputs:
+      codex_version:
+        description: Codex CLI version to install (latest or exact semver)
+        type: string
+        required: false
+        default: latest
+      codex_model:
+        description: Codex model to use for direct CLI response
+        type: string
+        required: false
+        default: gpt-5.5
+      codex_reasoning_effort:
+        description: Codex reasoning effort (none|low|medium|high|xhigh)
+        type: string
+        required: false
+        default: xhigh
     secrets:
-      CLAUDE_CODE_OAUTH_TOKEN:
+      CODEX_AUTH_JSON:
         required: true
-      CLAUDE_REVIEW_GH_TOKEN:
+      CODEX_REVIEW_GH_TOKEN:
         required: true
 
 permissions:
@@ -23,24 +39,24 @@ jobs:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
     env:
-      # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
-      GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-      GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+      # Use the Trips review token so comments are attributed consistently.
+      GITHUB_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
     if: |
       (
         github.event_name == 'issue_comment' &&
-        contains(github.event.comment.body, '@claude') &&
+        contains(github.event.comment.body, '@codex') &&
         !startsWith(github.event.comment.body, '/')
       ) ||
       (
         github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@claude')
+        contains(github.event.comment.body, '@codex')
       )
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+          token: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
 
       - name: Extract PR number
         id: extract-pr
@@ -153,7 +169,7 @@ jobs:
           echo "  Message preview: ${COMMENT_BODY:0:100}..."
 
       # yamllint disable rule:line-length
-      - name: Craft prompt for Claude
+      - name: Craft prompt for Codex
         id: craft-prompt
         if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
@@ -232,30 +248,106 @@ jobs:
           echo "prompt<<EOF" >> $GITHUB_OUTPUT
           echo "$FULL_PROMPT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          printf '%s\n' "$FULL_PROMPT" > prompt.txt
 
           echo "✅ Crafted prompt for comment type: ${{ steps.extract-comment.outputs.comment_type }}"
       # yamllint enable rule:line-length
 
-      - name: Run Claude response
-        uses: anthropics/claude-code-action@v1
+      - name: Setup Node
+        uses: actions/setup-node@v4
         if: steps.extract-pr.outputs.has_pr == 'true'
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-          claude_args: |
-            --model opus
-            --allowedTools "mcp__github__add_comment_to_pending_review,
-            mcp__github__add_pull_request_review_comment,
-            mcp__github__create_issue_comment,
-            mcp__github__get_file_contents,
-            mcp__github__get_pull_request_diff,
-            mcp__github_ci__get_ci_status,
-            mcp__github_ci__get_workflow_run_details,
-            mcp__github_ci__download_job_log,
-            mcp__github_comment__update_claude_comment,
-            mcp__github_inline_comment__create_inline_comment,
-            mcp__github_pulls__get_pull_request,
-            mcp__github_pulls__list_pull_request_files,
-            mcp__github_pulls__get_pull_request_diff,
-            Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
-          prompt: ${{ steps.craft-prompt.outputs.prompt }}
+          node-version: "22"
+
+      - name: Install Codex CLI
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        env:
+          PKG_NAME: "@openai/codex"
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          set -euo pipefail
+          version="${CODEX_VERSION:-latest}"
+          if ! printf '%s' "$version" | grep -qE '^(latest|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'; then
+            echo "::error::CODEX_VERSION must be 'latest' or strict semver MAJOR.MINOR.PATCH; got: $version" >&2
+            exit 1
+          fi
+          resolved="$(npm view "${PKG_NAME}@${version}" version 2>/dev/null | tail -n1 | tr -d '[:space:]')"
+          if ! printf '%s' "$resolved" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::resolved version is not strict semver: $resolved" >&2
+            exit 1
+          fi
+          echo "Installing ${PKG_NAME}@${resolved} (requested: ${version})"
+          npm_prefix="${RUNNER_TEMP}/npm-global"
+          mkdir -p "$npm_prefix"
+          npm config set prefix "$npm_prefix"
+          export PATH="${npm_prefix}/bin:${PATH}"
+          echo "${npm_prefix}/bin" >> "$GITHUB_PATH"
+          npm install -g --ignore-scripts "${PKG_NAME}@${resolved}"
+          codex --version
+
+      - name: Configure Codex authentication
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/codex-home
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CODEX_AUTH_JSON:-}" ]; then
+            echo "Need CODEX_AUTH_JSON to run the Codex response workflow." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+          codex login status
+
+      - name: Run Codex response
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/codex-home
+          CODEX_MODEL: ${{ inputs.codex_model }}
+          CODEX_REASONING_EFFORT: ${{ inputs.codex_reasoning_effort }}
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          prompt_content="$(cat prompt.txt)"
+          set +e
+          codex exec \
+            --model "$CODEX_MODEL" \
+            -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
+            --dangerously-bypass-approvals-and-sandbox \
+            -o codex-output.txt \
+            "$prompt_content" \
+            > codex-stdout.txt \
+            2> codex-error.txt
+          status=$?
+          set -e
+          {
+            echo "## Codex PR Response"
+            echo
+            echo "- PR: #${{ steps.extract-pr.outputs.pr_number }}"
+            echo "- Model: $CODEX_MODEL"
+            echo "- Reasoning effort: $CODEX_REASONING_EFFORT"
+            echo "- Exit code: $status"
+            echo
+            echo '```'
+            if [ -f codex-output.txt ]; then
+              cat codex-output.txt
+            else
+              echo "Codex output file was not created."
+            fi
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            if [ -s codex-error.txt ]; then
+              cat codex-error.txt >&2
+            else
+              echo "Codex exited without stderr." >&2
+            fi
+            exit "$status"
+          fi
+          cat codex-output.txt

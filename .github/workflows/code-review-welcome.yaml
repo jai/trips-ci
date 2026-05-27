@@ -1,4 +1,4 @@
-# Claude Code Review Welcome Workflow
+# Codex Code Review Welcome Workflow
 # Extracted from code-review.yaml for reusable welcome-comment behavior
 
 ---
@@ -31,7 +31,7 @@ jobs:
         run: |
           # Check if we already posted a welcome message
           WELCOME_EXISTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            --jq '[.[] | select(.body | (contains("🤖 **Claude PR Assistant**") or contains("🤖 **Code Review Assistant**")))] | length')
+            --jq '[.[] | select(.body | (contains("🤖 **Codex PR Assistant**") or contains("🤖 **Code Review Assistant**")))] | length')
 
           if [[ "$WELCOME_EXISTS" -gt 0 ]]; then
             echo "found=true" >> $GITHUB_OUTPUT
@@ -46,15 +46,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} --body "$(cat <<'EOF'
-          🤖 **Claude PR Assistant**
+          🤖 **Codex PR Assistant**
 
-          Welcome! This PR has access to AI-powered assistant support using **Claude Opus**.
+          Welcome! This PR has access to AI-powered assistant support using **Codex CLI**.
 
           **How to trigger:**
           - 🚀 Open/reopen PRs (including draft PRs)
           - 🧭 Comment `/review` (optionally add extra instructions after it)
-          - 💬 Tag `@claude` in any comment
-          - 📝 Reply to inline code comments with `@claude`
+          - 💬 Tag `@codex` in any comment
+          - 📝 Reply to inline code comments with `@codex`
 
           **What I can help with:**
           - Comprehensive review feedback (security, performance, best practices)

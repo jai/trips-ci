@@ -1,4 +1,4 @@
-# Claude Full Review Workflow (reusable)
+# Codex Full Review Workflow (reusable)
 # Extracted from code-review.yaml full-review path.
 # Handles:
 #   1. pull_request events (opened, reopened, ready_for_review, synchronize, review_requested)
@@ -6,7 +6,7 @@
 # CI owns final approve/request-changes orchestration.
 
 ---
-name: Claude Full Review
+name: Codex Full Review
 
 on:
   workflow_call:
@@ -16,14 +16,29 @@ on:
         type: string
         required: false
         default: ""
+      codex_version:
+        description: Codex CLI version to install (latest or exact semver)
+        type: string
+        required: false
+        default: latest
+      codex_model:
+        description: Codex model to use for direct CLI review
+        type: string
+        required: false
+        default: gpt-5.5
+      codex_reasoning_effort:
+        description: Codex reasoning effort (none|low|medium|high|xhigh)
+        type: string
+        required: false
+        default: xhigh
     secrets:
-      CLAUDE_CODE_OAUTH_TOKEN:
+      CODEX_AUTH_JSON:
         required: true
-      CLAUDE_REVIEW_GH_TOKEN:
+      CODEX_REVIEW_GH_TOKEN:
         required: true
     outputs:
       decision_found:
-        description: "Whether a valid CLAUDE_REVIEW_DECISION marker was found"
+        description: "Whether a valid CODEX_REVIEW_DECISION marker was found"
         value: ${{ jobs.review.outputs.decision_found }}
       decision:
         description: "Parsed decision value (APPROVE|REQUEST_CHANGES)"
@@ -65,9 +80,9 @@ jobs:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
     env:
-      # Force AI review actions to use the FINN DevOps PAT so downstream workflows are triggered
-      GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-      GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+      # Use the Trips review token so review comments and formal reviews are attributed consistently.
+      GITHUB_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
     outputs:
       decision_found: ${{ steps.set-outputs.outputs.decision_found }}
       decision: ${{ steps.set-outputs.outputs.decision }}
@@ -97,7 +112,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+          token: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
 
       - name: Extract PR number
         id: extract-pr
@@ -270,11 +285,11 @@ jobs:
 
             ## Structured Decision Marker (required)
             At the end of each full review, post EXACTLY one PR comment containing this exact marker block:
-            <!-- CLAUDE_REVIEW_DECISION -->
+            <!-- CODEX_REVIEW_DECISION -->
             DECISION=APPROVE|REQUEST_CHANGES
             BLOCKER=<required when DECISION=REQUEST_CHANGES>
             NEXT_ACTION=<required when DECISION=REQUEST_CHANGES>
-            <!-- /CLAUDE_REVIEW_DECISION -->
+            <!-- /CODEX_REVIEW_DECISION -->
 
             Rules:
             - Always emit DECISION.
@@ -348,37 +363,9 @@ jobs:
           echo "prompt<<EOF" >> "$GITHUB_OUTPUT"
           echo "$FULL_PROMPT" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$FULL_PROMPT" > prompt.txt
 
           echo "✅ Crafted full-review prompt"
-
-      - name: Check track_progress support
-        id: check-track-progress
-        if: |
-          steps.extract-pr.outputs.has_pr == 'true' &&
-          steps.extract-context.outputs.has_review_trigger == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Event: ${{ github.event_name }}, Action: ${{ github.event.action }}"
-
-          case "${{ github.event_name }}" in
-            pull_request)
-              case "${{ github.event.action }}" in
-                ready_for_review)
-                  echo "track_progress=true" >> "$GITHUB_OUTPUT"
-                  echo "✅ track_progress supported for pull_request/${{ github.event.action }}"
-                  ;;
-                *)
-                  echo "track_progress=false" >> "$GITHUB_OUTPUT"
-                  echo "⚠️ track_progress not supported for pull_request/${{ github.event.action }}"
-                  ;;
-              esac
-              ;;
-            *)
-              echo "track_progress=false" >> "$GITHUB_OUTPUT"
-              echo "⚠️ track_progress not supported for ${{ github.event_name }}/${{ github.event.action }}"
-              ;;
-          esac
 
       - name: Capture review start timestamp
         id: review-started-at
@@ -390,40 +377,121 @@ jobs:
           set -euo pipefail
           echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Run Claude full review
-        id: run-claude
-        uses: anthropics/claude-code-action@v1
-        continue-on-error: true
+      - name: Setup Node
+        uses: actions/setup-node@v4
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.extract-context.outputs.has_review_trigger == 'true'
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-          track_progress: ${{ steps.check-track-progress.outputs.track_progress }}
-          claude_args: |
-            --model opus
-            --allowedTools "mcp__github__add_comment_to_pending_review,
-            mcp__github__add_pull_request_review_comment,
-            mcp__github__create_issue_comment,
-            mcp__github__get_file_contents,
-            mcp__github__get_pull_request_diff,
-            mcp__github_ci__get_ci_status,
-            mcp__github_ci__get_workflow_run_details,
-            mcp__github_ci__download_job_log,
-            mcp__github_comment__update_claude_comment,
-            mcp__github_inline_comment__create_inline_comment,
-            mcp__github_pulls__get_pull_request,
-            mcp__github_pulls__list_pull_request_files,
-            mcp__github_pulls__get_pull_request_diff,
-            Bash,Read,Grep,Glob,WebFetch,WebSearch,TodoWrite"
-          prompt: ${{ steps.craft-prompt.outputs.prompt }}
+          node-version: "22"
 
-      - name: Fallback decision marker when Claude execution crashes
+      - name: Install Codex CLI
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.extract-context.outputs.has_review_trigger == 'true'
+        shell: bash
+        env:
+          PKG_NAME: "@openai/codex"
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          set -euo pipefail
+          version="${CODEX_VERSION:-latest}"
+          if ! printf '%s' "$version" | grep -qE '^(latest|[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'; then
+            echo "::error::CODEX_VERSION must be 'latest' or strict semver MAJOR.MINOR.PATCH; got: $version" >&2
+            exit 1
+          fi
+          resolved="$(npm view "${PKG_NAME}@${version}" version 2>/dev/null | tail -n1 | tr -d '[:space:]')"
+          if ! printf '%s' "$resolved" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::resolved version is not strict semver: $resolved" >&2
+            exit 1
+          fi
+          echo "Installing ${PKG_NAME}@${resolved} (requested: ${version})"
+          npm_prefix="${RUNNER_TEMP}/npm-global"
+          mkdir -p "$npm_prefix"
+          npm config set prefix "$npm_prefix"
+          export PATH="${npm_prefix}/bin:${PATH}"
+          echo "${npm_prefix}/bin" >> "$GITHUB_PATH"
+          npm install -g --ignore-scripts "${PKG_NAME}@${resolved}"
+          codex --version
+
+      - name: Configure Codex authentication
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.extract-context.outputs.has_review_trigger == 'true'
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/codex-home
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CODEX_AUTH_JSON:-}" ]; then
+            echo "Need CODEX_AUTH_JSON to run the Codex code-review workflow." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+          codex login status
+
+      - name: Run Codex full review
+        id: run-codex
+        continue-on-error: true
+        if: |
+          steps.extract-pr.outputs.has_pr == 'true' &&
+          steps.extract-context.outputs.has_review_trigger == 'true'
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/codex-home
+          CODEX_MODEL: ${{ inputs.codex_model }}
+          CODEX_REASONING_EFFORT: ${{ inputs.codex_reasoning_effort }}
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          prompt_content="$(cat prompt.txt)"
+          set +e
+          codex exec \
+            --model "$CODEX_MODEL" \
+            -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
+            --dangerously-bypass-approvals-and-sandbox \
+            -o codex-output.txt \
+            "$prompt_content" \
+            > codex-stdout.txt \
+            2> codex-error.txt
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Codex Full Code Review"
+            echo
+            echo "- PR: #${{ steps.extract-pr.outputs.pr_number }}"
+            echo "- Model: $CODEX_MODEL"
+            echo "- Reasoning effort: $CODEX_REASONING_EFFORT"
+            echo "- Exit code: $status"
+            echo
+            echo '```'
+            if [ -f codex-output.txt ]; then
+              cat codex-output.txt
+            else
+              echo "Codex output file was not created."
+            fi
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            if [ -s codex-error.txt ]; then
+              cat codex-error.txt >&2
+            else
+              echo "Codex exited without stderr." >&2
+            fi
+            exit "$status"
+          fi
+          cat codex-output.txt
+
+      - name: Fallback decision marker when Codex execution crashes
         if: |
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.extract-context.outputs.has_review_trigger == 'true' &&
-          steps.run-claude.outcome == 'failure'
+          steps.run-codex.outcome == 'failure'
         shell: bash
         run: |
           set -euo pipefail
@@ -431,19 +499,19 @@ jobs:
           PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          BLOCKER="Claude full-review execution crashed before emitting a structured decision marker (see run log: ${RUN_URL})."
-          NEXT_ACTION="Re-run /review on this PR after Claude service recovers; if persistent, investigate the failing run logs and workflow inputs."
+          BLOCKER="Codex full-review execution crashed before emitting a structured decision marker (see run log: ${RUN_URL})."
+          NEXT_ACTION="Re-run /review on this PR after Codex auth/service recovers; if persistent, investigate the failing run logs and workflow inputs."
 
           FALLBACK_MARKER=$(printf '%s\n' \
-            "<!-- CLAUDE_REVIEW_DECISION -->" \
+            "<!-- CODEX_REVIEW_DECISION -->" \
             "DECISION=REQUEST_CHANGES" \
             "BLOCKER=${BLOCKER}" \
             "NEXT_ACTION=${NEXT_ACTION}" \
-            "<!-- /CLAUDE_REVIEW_DECISION -->")
+            "<!-- /CODEX_REVIEW_DECISION -->")
 
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$FALLBACK_MARKER"
 
-          echo "::warning::Claude action failed; posted fail-closed REQUEST_CHANGES marker so orchestration can continue without a red required check."
+          echo "::warning::Codex CLI failed; posted fail-closed REQUEST_CHANGES marker so orchestration can continue without a red required check."
 
       - name: Parse structured review decision
         id: parse-review-decision
@@ -472,8 +540,8 @@ jobs:
                 .[]
                 | select(.user.login == $automation_login)
                 | select(.created_at >= $run_started_at)
-                | select(.body | contains("<!-- CLAUDE_REVIEW_DECISION -->"))
-                | select(.body | contains("<!-- /CLAUDE_REVIEW_DECISION -->"))
+                | select(.body | contains("<!-- CODEX_REVIEW_DECISION -->"))
+                | select(.body | contains("<!-- /CODEX_REVIEW_DECISION -->"))
               ]
               | sort_by(.created_at)
               | reverse
@@ -491,8 +559,8 @@ jobs:
             COMMENT_BODY=$(printf '%s' "$entry" | base64 -d | jq -r '.body // empty')
 
             MARKER_BLOCK=$(printf '%s\n' "$COMMENT_BODY" | awk '
-              /<!-- CLAUDE_REVIEW_DECISION -->/ {in_block=1; next}
-              /<!-- \/CLAUDE_REVIEW_DECISION -->/ {in_block=0}
+              /<!-- CODEX_REVIEW_DECISION -->/ {in_block=1; next}
+              /<!-- \/CODEX_REVIEW_DECISION -->/ {in_block=0}
               in_block {print}
             ')
 
@@ -536,7 +604,7 @@ jobs:
           if [[ "$DECISION_FOUND" == "true" ]]; then
             echo "✅ Parsed decision marker: ${DECISION}"
           else
-            echo "::error::No valid CLAUDE_REVIEW_DECISION marker found after ${RUN_STARTED_AT}; failing closed (no workflow-submitted review action)."
+            echo "::error::No valid CODEX_REVIEW_DECISION marker found after ${RUN_STARTED_AT}; failing closed (no workflow-submitted review action)."
             exit 1
           fi
 
@@ -606,13 +674,13 @@ jobs:
       total_threads: ${{ steps.thread-counts.outputs.total_threads }}
       unresolved_threads: ${{ steps.thread-counts.outputs.unresolved_threads }}
     env:
-      GITHUB_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
-      GH_TOKEN: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+      GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.CLAUDE_REVIEW_GH_TOKEN }}
+          token: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
 
       - name: Fetch PR metadata
         id: pr-meta
@@ -821,7 +889,7 @@ jobs:
           PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
 
           TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
-            | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after claude review decision"))] | length')
+            | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after codex review decision"))] | length')
 
           if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
             echo "already_triggered=true" >> "$GITHUB_OUTPUT"
@@ -854,12 +922,12 @@ jobs:
 
           echo "ℹ️ PR #${{ steps.pr-meta.outputs.pr_number }}: ${{ steps.checks.outputs.trigger_reason }}. Pushing one empty commit to trigger CI."
 
-          git config user.name "Claude PR Assistant"
+          git config user.name "Codex PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git fetch origin "$HEAD_REF"
           git switch -C "$HEAD_REF" "origin/$HEAD_REF"
-          git commit --allow-empty -m "ci: trigger checks after claude review decision"
+          git commit --allow-empty -m "ci: trigger checks after codex review decision"
           git push origin "HEAD:$HEAD_REF"
 
       - name: Skip workflow-owned APPROVED review for self-authored PR
@@ -883,7 +951,7 @@ jobs:
 
           set +e
           REVIEW_OUTPUT=$(gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
-            --body "CI approval: Claude decision APPROVE and unresolved review threads = 0." 2>&1)
+            --body "CI approval: Codex decision APPROVE and unresolved review threads = 0." 2>&1)
           REVIEW_EXIT=$?
           set -e
 

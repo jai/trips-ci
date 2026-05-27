@@ -9,11 +9,11 @@
 ## Decision Marker Schema (reference)
 
 ```text
-<!-- CLAUDE_REVIEW_DECISION -->
+<!-- CODEX_REVIEW_DECISION -->
 DECISION=APPROVE|REQUEST_CHANGES
 BLOCKER=<required when REQUEST_CHANGES>
 NEXT_ACTION=<required when REQUEST_CHANGES>
-<!-- /CLAUDE_REVIEW_DECISION -->
+<!-- /CODEX_REVIEW_DECISION -->
 ```
 
 Parser rules:
@@ -31,7 +31,7 @@ Parser rules:
 - **Trigger/event**: `pull_request` (opened | reopened | synchronize | review_requested) or `/review` slash command
 - **Preconditions**:
   - PR exists, not draft (or draft with UC-02).
-  - Claude posts valid `DECISION=APPROVE` marker.
+  - Codex posts valid `DECISION=APPROVE` marker.
   - All review threads resolved (unresolved = 0).
 - **Expected decision path**: `parse-review-decision` → `decision_found=true`, `decision=APPROVE`
 - **Expected workflow actions**:
@@ -43,7 +43,7 @@ Parser rules:
 - **Evidence to capture**:
   - Workflow run URL (both `review` and `review-orchestration` jobs green).
   - PR review list: `gh pr reviews <PR> --json author,state` shows `APPROVED` from automation user.
-  - PR comment containing `<!-- CLAUDE_REVIEW_DECISION -->` with `DECISION=APPROVE`.
+  - PR comment containing `<!-- CODEX_REVIEW_DECISION -->` with `DECISION=APPROVE`.
   - `review-orchestration` job log line: `✅ Approval precondition satisfied: unresolved_threads=0`.
 
 #### Validation Playbook
@@ -62,7 +62,7 @@ gh run list --repo "$REPO" --branch "$(gh pr view $PR_NUMBER --repo $REPO --json
 
 # 3. Assert: decision marker exists
 gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  | jq '[.[] | select(.body | contains("CLAUDE_REVIEW_DECISION")) | select(.body | contains("DECISION=APPROVE"))] | length'
+  | jq '[.[] | select(.body | contains("CODEX_REVIEW_DECISION")) | select(.body | contains("DECISION=APPROVE"))] | length'
 # PASS: >= 1
 
 # 4. Assert: workflow-submitted APPROVED review
@@ -88,7 +88,7 @@ gh run view "$RUN_ID" --repo "$REPO" --json jobs \
 - **Trigger/event**: `/review` slash command on a draft PR
 - **Preconditions**:
   - PR is in draft state (`gh pr view --json isDraft` → `true`).
-  - Claude posts valid `DECISION=APPROVE` marker.
+  - Codex posts valid `DECISION=APPROVE` marker.
   - All review threads resolved.
 - **Expected decision path**: Same as UC-01.
 - **Expected workflow actions**:
@@ -132,7 +132,7 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json isDraft -q '.isDraft'
 
 - **Trigger/event**: `pull_request` event or `/review` slash command
 - **Preconditions**:
-  - Claude posts valid `DECISION=REQUEST_CHANGES` marker with both `BLOCKER` and `NEXT_ACTION`.
+  - Codex posts valid `DECISION=REQUEST_CHANGES` marker with both `BLOCKER` and `NEXT_ACTION`.
 - **Expected decision path**: `parse-review-decision` → `decision_found=true`, `decision=REQUEST_CHANGES`, `blocker` and `next_action` populated.
 - **Expected workflow actions**:
   1. `review-orchestration` job runs.
@@ -178,7 +178,7 @@ gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude posts valid `DECISION=APPROVE` marker.
+  - Codex posts valid `DECISION=APPROVE` marker.
   - At least 1 unresolved review thread exists on the PR.
 - **Expected decision path**: `decision_found=true`, `decision=APPROVE`.
 - **Expected workflow actions**:
@@ -203,11 +203,11 @@ PR_NUMBER=<test-pr-with-unresolved-thread>
 # (manually leave a review comment unresolved, or create one via API)
 
 # Simulate: post APPROVE marker as automation user
-# (In real flow, Claude would post this; for testing, force-post the marker)
+# (In real flow, Codex would post this; for testing, force-post the marker)
 AUTOMATION_USER=$(gh api user --jq '.login')
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=APPROVE
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 # Trigger review or let the existing run proceed
 
@@ -236,7 +236,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "DECISION=APPROVE requ
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude completes review but does NOT post a `<!-- CLAUDE_REVIEW_DECISION -->` marker.
+  - Codex completes review but does NOT post a `<!-- CODEX_REVIEW_DECISION -->` marker.
 - **Expected decision path**: `parse-review-decision` → `decision_found=false`.
 - **Expected workflow actions**:
   1. `review` job completes with `decision_found=false`.
@@ -246,7 +246,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "DECISION=APPROVE requ
 - **Evidence to capture**:
   - `review` job output: `decision_found=false`.
   - `review-orchestration` job status: `skipped`.
-  - Warning annotation: `No valid CLAUDE_REVIEW_DECISION marker found`.
+  - Warning annotation: `No valid CODEX_REVIEW_DECISION marker found`.
 
 #### Validation Playbook
 
@@ -254,8 +254,8 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "DECISION=APPROVE requ
 REPO="jai/trips-frontend"
 PR_NUMBER=<test-pr>
 
-# Scenario: Claude ran but didn't post marker
-# (This would need a test where Claude's prompt is modified, or marker is manually deleted after run)
+# Scenario: Codex ran but didn't post marker
+# (This would need a test where Codex's prompt is modified, or marker is manually deleted after run)
 
 # Assert: review job outputs
 RUN_ID=$(gh run list --repo "$REPO" --workflow "code-review.yaml" --limit 1 --json databaseId -q '.[0].databaseId')
@@ -266,7 +266,7 @@ gh run view "$RUN_ID" --repo "$REPO" --json jobs \
 # PASS: conclusion == "skipped" or conclusion == null (job didn't run)
 
 # Check warning in logs
-gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "No valid CLAUDE_REVIEW_DECISION marker found"
+gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "No valid CODEX_REVIEW_DECISION marker found"
 # PASS: >= 1
 ```
 
@@ -278,7 +278,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "No valid CLAUDE_REVIE
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude posts a marker block with `DECISION=LGTM` (or any value other than `APPROVE`/`REQUEST_CHANGES`).
+  - Codex posts a marker block with `DECISION=LGTM` (or any value other than `APPROVE`/`REQUEST_CHANGES`).
 - **Expected decision path**: Parser's `case` statement falls through to `*)`; marker is not valid → `decision_found=false`.
 - **Expected workflow actions**: Same as UC-05 — orchestration skipped.
 - **Expected PR outcome**: No review state change.
@@ -288,9 +288,9 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "No valid CLAUDE_REVIE
 
 ```bash
 # Simulate: post marker with invalid decision
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=LGTM
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 # Then trigger review and verify same assertions as UC-05
 ```
@@ -303,7 +303,7 @@ DECISION=LGTM
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude posts marker: `DECISION=REQUEST_CHANGES` but omits `BLOCKER=`.
+  - Codex posts marker: `DECISION=REQUEST_CHANGES` but omits `BLOCKER=`.
 - **Expected decision path**: Parser requires both `BLOCKER` and `NEXT_ACTION` for `REQUEST_CHANGES` to be valid. Missing `BLOCKER` → marker invalid → `decision_found=false`.
 - **Expected workflow actions**: Same as UC-05 — orchestration skipped.
 - **Expected PR outcome**: No review state change.
@@ -312,10 +312,10 @@ DECISION=LGTM
 
 ```bash
 # Simulate: REQUEST_CHANGES without BLOCKER
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=REQUEST_CHANGES
 NEXT_ACTION=Fix the tests
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 # Assertions same as UC-05
 ```
@@ -328,7 +328,7 @@ NEXT_ACTION=Fix the tests
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude posts marker: `DECISION=REQUEST_CHANGES` with `BLOCKER=` but omits `NEXT_ACTION=`.
+  - Codex posts marker: `DECISION=REQUEST_CHANGES` with `BLOCKER=` but omits `NEXT_ACTION=`.
 - **Expected decision path**: Same as UC-07 — marker invalid → `decision_found=false`.
 - **Expected workflow actions**: Same as UC-05.
 
@@ -336,10 +336,10 @@ NEXT_ACTION=Fix the tests
 
 ```bash
 # Simulate: REQUEST_CHANGES without NEXT_ACTION
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=REQUEST_CHANGES
 BLOCKER=Merge conflict
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 # Assertions same as UC-05
 ```
@@ -348,23 +348,20 @@ BLOCKER=Merge conflict
 
 ---
 
-### UC-09 · Conversational @claude cannot approve/request-changes (respond workflow)
+### UC-09 · Conversational @codex cannot approve/request-changes (respond workflow)
 
-- **Trigger/event**: `issue_comment` containing `@claude` (not `/review`) OR `pull_request_review_comment` containing `@claude`
+- **Trigger/event**: `issue_comment` containing `@codex` (not `/review`) OR `pull_request_review_comment` containing `@codex`
 - **Preconditions**:
-  - Comment contains `@claude` but does NOT start with `/`.
+  - Comment contains `@codex` but does NOT start with `/`.
   - Respond workflow runs (not full-review workflow).
 - **Expected decision path**: No decision parsing occurs (respond workflow has no `parse-review-decision` step).
 - **Expected workflow actions**:
   1. `respond` job runs with conversational prompt.
   2. Prompt contains `CONVERSATIONAL-ONLY RULE (MANDATORY)`.
-  3. `allowedTools` excludes:
-     - `mcp__github__create_pending_pull_request_review`
-     - `mcp__github__submit_pending_pull_request_review`
-  4. Claude can only post conversational comments.
+  3. Prompt forbids `gh pr review --approve` and `gh pr review --request-changes`.
+  4. Codex can only post conversational comments.
 - **Expected PR outcome**: No review state change. Only conversational reply posted.
 - **Evidence to capture**:
-  - Workflow YAML inspection: `allowedTools` in respond workflow does NOT contain `create_pending_pull_request_review` or `submit_pending_pull_request_review`.
   - Prompt text contains `Never approve a PR and never request changes`.
   - No new `APPROVED` or `CHANGES_REQUESTED` reviews from automation user.
 
@@ -374,16 +371,16 @@ BLOCKER=Merge conflict
 REPO="jai/trips-frontend"
 PR_NUMBER=<test-pr>
 
-# 1. Post conversational @claude comment
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@claude Can you explain the approach here?"
+# 1. Post conversational @codex comment
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@codex Can you explain the approach here?"
 
 # 2. Wait for respond workflow to complete
 RUN_ID=$(gh run list --repo "$REPO" --workflow "code-review.yaml" --limit 1 --json databaseId -q '.[0].databaseId')
 
-# 3. Static check: verify allowedTools in code-review-respond.yaml
-grep -c "create_pending_pull_request_review\|submit_pending_pull_request_review" \
+# 3. Static check: verify the respond prompt forbids formal review state changes
+grep -c "Never approve a PR and never request changes" \
   .github/workflows/code-review-respond.yaml
-# PASS: 0 (not present)
+# PASS: >= 1
 
 # 4. Assert: no new review state changes from automation user
 REVIEWS_BEFORE=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq 'length')
@@ -408,7 +405,7 @@ gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
   - Comment is on a PR (not a plain issue).
   - Comment body starts with `/review` (with optional args after).
 - **Expected decision path**: `extract-context` → `context_type=slash_review`, `trigger_desc=/review slash command`.
-- **Expected workflow actions**: Full review runs; same decision flow as UC-01/UC-03 depending on Claude's decision.
+- **Expected workflow actions**: Full review runs; same decision flow as UC-01/UC-03 depending on Codex's decision.
 - **Expected PR outcome**: Full review with decision marker posted.
 - **Evidence to capture**:
   - `review` job log: `context_type=slash_review`.
@@ -468,7 +465,7 @@ gh run view "$RUN_ID" --repo "$REPO" --json jobs | jq '.jobs[] | {name, conclusi
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Claude posts TWO valid marker comments during the same run window (both after `started_at`, both from automation user).
+  - Codex posts TWO valid marker comments during the same run window (both after `started_at`, both from automation user).
   - First: `DECISION=REQUEST_CHANGES` (with blocker/next_action).
   - Second (later timestamp): `DECISION=APPROVE`.
 - **Expected decision path**: Parser sorts by `created_at` descending, picks first valid → `DECISION=APPROVE`.
@@ -481,17 +478,17 @@ gh run view "$RUN_ID" --repo "$REPO" --json jobs | jq '.jobs[] | {name, conclusi
 
 ```bash
 # Simulate: post two markers as automation user in sequence
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=REQUEST_CHANGES
 BLOCKER=test blocker
 NEXT_ACTION=test action
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 sleep 2
 
-gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CLAUDE_REVIEW_DECISION -->
+gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=APPROVE
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 
 # Trigger and verify APPROVE is the acted-upon decision
 ```
@@ -502,7 +499,7 @@ DECISION=APPROVE
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - A human user (not the automation actor) posts a comment containing a valid `CLAUDE_REVIEW_DECISION` marker.
+  - A human user (not the automation actor) posts a comment containing a valid `CODEX_REVIEW_DECISION` marker.
   - No marker from the automation user exists.
 - **Expected decision path**: Parser filters by `automation_login` → no candidates → `decision_found=false`.
 - **Expected workflow actions**: Same as UC-05 — orchestration skipped.
@@ -511,9 +508,9 @@ DECISION=APPROVE
 
 ```bash
 # As a regular user (not the GH App / PAT user), post:
-# <!-- CLAUDE_REVIEW_DECISION -->
+# <!-- CODEX_REVIEW_DECISION -->
 # DECISION=APPROVE
-# <!-- /CLAUDE_REVIEW_DECISION -->
+# <!-- /CODEX_REVIEW_DECISION -->
 
 # Then trigger review and verify decision_found=false (same as UC-05)
 ```
@@ -540,7 +537,7 @@ DECISION=APPROVE
 - **Expected workflow actions**:
   1. `checks` step: `should_trigger=true`.
   2. `duplicate-commit` step: `already_triggered=false`.
-  3. Empty commit pushed: `ci: trigger checks after claude review decision`.
+  3. Empty commit pushed: `ci: trigger checks after codex review decision`.
   4. Approval submitted.
 - **Evidence to capture**:
   - Commit history includes empty commit with expected message.
@@ -600,7 +597,7 @@ grep -c "create_pending_pull_request_review\|submit_pending_pull_request_review"
 - **UC-06**: ❌ Invalid decision value → fail closed (negative)
 - **UC-07**: ❌ REQUEST_CHANGES without BLOCKER → fail closed (negative)
 - **UC-08**: ❌ REQUEST_CHANGES without NEXT_ACTION → fail closed (negative)
-- **UC-09**: 🔒 Conversational @claude cannot approve/request-changes
+- **UC-09**: 🔒 Conversational @codex cannot approve/request-changes
 - **UC-10**: ✅ `/review` slash command trigger
 - **UC-11**: ✅ PR event triggers (opened/reopened/synchronize/ready_for_review/review_requested)
 - **UC-12**: ✅ Multiple markers → latest valid wins
@@ -635,11 +632,11 @@ For negative-path tests (UC-04 through UC-08), manual marker injection may be ne
 ```bash
 # Post a decision marker as the automation user
 gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
-  -f body='<!-- CLAUDE_REVIEW_DECISION -->
+  -f body='<!-- CODEX_REVIEW_DECISION -->
 DECISION=<value>
 BLOCKER=<if needed>
 NEXT_ACTION=<if needed>
-<!-- /CLAUDE_REVIEW_DECISION -->'
+<!-- /CODEX_REVIEW_DECISION -->'
 ```
 
 For UC-04 specifically, create an unresolved review thread:
