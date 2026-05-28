@@ -1,0 +1,65 @@
+---
+name: PR Image Check
+
+on:
+  workflow_call:
+    secrets:
+      GH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-images:
+    name: Validate PR Images
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Check PR markdown image URLs
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          body_file="$(mktemp)"
+          gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+            --jq '.body // ""' \
+            > "$body_file"
+
+          urls_file="$(mktemp)"
+          grep -oE '!\[[^]]*\]\([^)]+' "$body_file" \
+            | sed -E 's/^!\[[^]]*\]\(//; s/[[:space:]].*$//; s/^<//; s/>$//' \
+            | sort -u \
+            > "$urls_file" || true
+
+          if [[ ! -s "$urls_file" ]]; then
+            echo "No markdown image URLs found."
+            exit 0
+          fi
+
+          failed=0
+          while IFS= read -r url; do
+            if [[ "$url" != http://* && "$url" != https://* ]]; then
+              echo "Skipping non-HTTP image URL: $url"
+              continue
+            fi
+
+            status="$(
+              curl --location --silent --show-error --output /dev/null \
+                --write-out '%{http_code}' \
+                --max-time 20 \
+                "$url" || true
+            )"
+
+            if [[ ! "$status" =~ ^[0-9]{3}$ || "$status" -ge 400 ]]; then
+              echo "Image URL failed with HTTP $status: $url"
+              failed=1
+            else
+              echo "Image URL OK with HTTP $status: $url"
+            fi
+          done < "$urls_file"
+
+          exit "$failed"
