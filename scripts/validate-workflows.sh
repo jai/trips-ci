@@ -25,6 +25,7 @@ actionlint_args=(
 
 actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
+actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \

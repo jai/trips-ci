@@ -1,0 +1,213 @@
+---
+name: Issue Flow Gate
+
+on:
+  workflow_call:
+    inputs:
+      allowed_ready_labels:
+        description: Comma-separated issue labels that allow implementation PRs.
+        required: false
+        type: string
+        default: implementation-ready,ready
+      blocked_labels:
+        description: Comma-separated issue labels that block implementation PRs.
+        required: false
+        type: string
+        default: needs-spec,needs-design,requirements-unclear,blocked,not-ready,do-not-start,human-intervention-needed
+      exempt_pr_labels:
+        description: Comma-separated PR labels that bypass this gate.
+        required: false
+        type: string
+        default: flow-exempt
+      skip_bot_authors:
+        description: Skip PRs opened by common dependency/release automation bots.
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      CODEX_REVIEW_GH_TOKEN:
+        required: false
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  issue-flow:
+    name: Validate linked issue flow
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Validate linked issues are implementation-ready
+        uses: actions/github-script@v7
+        env:
+          ALLOWED_READY_LABELS: ${{ inputs.allowed_ready_labels || 'implementation-ready,ready' }}
+          BLOCKED_LABELS: ${{ inputs.blocked_labels || 'needs-spec,needs-design,requirements-unclear,blocked,not-ready,do-not-start,human-intervention-needed' }}
+          EXEMPT_PR_LABELS: ${{ inputs.exempt_pr_labels || 'flow-exempt' }}
+          SKIP_BOT_AUTHORS: ${{ inputs.skip_bot_authors || 'true' }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_GH_TOKEN || github.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.notice("No pull_request payload; skipping issue-flow gate.");
+              return;
+            }
+
+            const parseList = (value) =>
+              new Set(
+                String(value || "")
+                  .split(",")
+                  .map((item) => item.trim())
+                  .filter(Boolean),
+              );
+
+            const allowedReady = parseList(process.env.ALLOWED_READY_LABELS);
+            const blocked = parseList(process.env.BLOCKED_LABELS);
+            const exemptPrLabels = parseList(process.env.EXEMPT_PR_LABELS);
+            const skipBotAuthors = process.env.SKIP_BOT_AUTHORS === "true";
+
+            const author = pr.user?.login || "";
+            if (
+              skipBotAuthors &&
+              ["dependabot[bot]", "github-actions[bot]", "renovate[bot]", "release-please[bot]"].includes(author)
+            ) {
+              core.notice(`Skipping issue-flow gate for automation author ${author}.`);
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    body
+                    labels(first: 100) {
+                      nodes { name }
+                    }
+                    closingIssuesReferences(first: 20) {
+                      nodes {
+                        number
+                        title
+                        url
+                        state
+                        repository { nameWithOwner }
+                        labels(first: 100) {
+                          nodes { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query, {
+              owner,
+              repo,
+              number: pr.number,
+            });
+
+            const pullRequest = result.repository.pullRequest;
+            const prLabels = new Set((pullRequest.labels.nodes || []).map((label) => label.name));
+            const exemptLabel = [...prLabels].find((label) => exemptPrLabels.has(label));
+            if (exemptLabel) {
+              core.notice(`Skipping issue-flow gate because PR has ${exemptLabel}.`);
+              return;
+            }
+
+            const issueByKey = new Map();
+            const addIssue = (issue) => {
+              issueByKey.set(`${issue.repository.nameWithOwner}#${issue.number}`, {
+                number: issue.number,
+                title: issue.title,
+                url: issue.url,
+                state: issue.state,
+                repository: issue.repository.nameWithOwner,
+                labels: new Set((issue.labels.nodes || issue.labels || []).map((label) => label.name || label)),
+              });
+            };
+
+            for (const issue of pullRequest.closingIssuesReferences.nodes || []) {
+              addIssue(issue);
+            }
+
+            const body = pullRequest.body || "";
+            const bodyRefs = new Map();
+            const addRef = (refOwner, refRepo, number) => {
+              if (!Number.isInteger(number) || number <= 0) return;
+              bodyRefs.set(`${refOwner}/${refRepo}#${number}`, { owner: refOwner, repo: refRepo, number });
+            };
+
+            for (const match of body.matchAll(/github\.com\/([^/\s)]+)\/([^/\s)]+)\/issues\/(\d+)/gi)) {
+              addRef(match[1], match[2], Number.parseInt(match[3], 10));
+            }
+            for (const match of body.matchAll(/(?:^|[\s(])([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)\b/g)) {
+              addRef(match[1], match[2], Number.parseInt(match[3], 10));
+            }
+            for (const match of body.matchAll(/(?:^|[\s(])#(\d+)\b/g)) {
+              addRef(owner, repo, Number.parseInt(match[1], 10));
+            }
+
+            for (const ref of bodyRefs.values()) {
+              const key = `${ref.owner}/${ref.repo}#${ref.number}`;
+              if (issueByKey.has(key)) continue;
+
+              const { data } = await github.rest.issues.get({
+                owner: ref.owner,
+                repo: ref.repo,
+                issue_number: ref.number,
+              });
+
+              if (data.pull_request) continue;
+              addIssue({
+                number: data.number,
+                title: data.title,
+                url: data.html_url,
+                state: data.state.toUpperCase(),
+                repository: { nameWithOwner: `${ref.owner}/${ref.repo}` },
+                labels: data.labels.map((label) => label.name),
+              });
+            }
+
+            const issues = [...issueByKey.values()];
+            if (issues.length === 0) {
+              core.setFailed(
+                "No linked issue found. Link the implementation issue in the PR body, preferably with `Fixes owner/repo#123`.",
+              );
+              return;
+            }
+
+            const blockedFindings = [];
+            let hasReadyIssue = false;
+
+            for (const issue of issues) {
+              const issueBlockedLabels = [...issue.labels].filter((label) => blocked.has(label));
+              const issueReadyLabels = [...issue.labels].filter((label) => allowedReady.has(label));
+              if (issueBlockedLabels.length > 0) {
+                blockedFindings.push(`${issue.repository}#${issue.number} has ${issueBlockedLabels.join(", ")}`);
+              }
+              if (issueReadyLabels.length > 0) {
+                hasReadyIssue = true;
+              }
+            }
+
+            if (blockedFindings.length > 0) {
+              core.setFailed(`Linked issue is not ready for implementation:\n- ${blockedFindings.join("\n- ")}`);
+              return;
+            }
+
+            if (!hasReadyIssue) {
+              core.setFailed(
+                `At least one linked issue must have one of: ${[...allowedReady].join(", ")}.`,
+              );
+              return;
+            }
+
+            core.notice(
+              `Issue-flow gate passed for linked issues: ${issues
+                .map((issue) => `${issue.repository}#${issue.number}`)
+                .join(", ")}`,
+            );
