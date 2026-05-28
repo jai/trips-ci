@@ -11,7 +11,12 @@ trap cleanup EXIT
 
 rm -rf "$tmp_dir"
 mkdir -p "$tmp_dir/.github/workflows"
-cp "$repo_root/templates/code-review-caller.yaml" "$tmp_dir/.github/workflows/code-review.yaml"
+"$repo_root/scripts/generate-caller-workflows.sh" --stdout \
+  /Users/jai/Developer/trips \
+  > "$tmp_dir/.github/workflows/code-review.yaml"
+"$repo_root/scripts/generate-caller-workflows.sh" --stdout \
+  /Users/jai/Developer/trips-fastlane \
+  > "$tmp_dir/.github/workflows/code-review-fastlane.yaml"
 
 actionlint_args=(
   -shellcheck=
@@ -19,7 +24,7 @@ actionlint_args=(
 )
 
 actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
-actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows/code-review.yaml"
+actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \
