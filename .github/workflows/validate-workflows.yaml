@@ -1,0 +1,40 @@
+---
+name: Validate Workflows
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/**"
+      - "templates/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "scripts/**"
+      - "templates/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Validate workflow library
+        shell: bash
+        run: scripts/validate-workflows.sh

@@ -1,0 +1,105 @@
+---
+name: Codex PR Assistant
+
+on:
+  workflow_call:
+    inputs:
+      custom_review_instructions:
+        description: Optional additional review instructions prepended to the default review prompt.
+        type: string
+        required: false
+        default: ""
+      codex_version:
+        description: Codex CLI version to install (latest or exact semver).
+        type: string
+        required: false
+        default: latest
+      codex_model:
+        description: Codex model to use for direct CLI review and responses.
+        type: string
+        required: false
+        default: gpt-5.5
+      codex_reasoning_effort:
+        description: Codex reasoning effort (none|low|medium|high|xhigh).
+        type: string
+        required: false
+        default: xhigh
+    secrets:
+      CODEX_AUTH_JSON:
+        required: true
+      CODEX_REVIEW_GH_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  welcome:
+    name: Welcome comment
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
+      (github.event.action == 'opened' || github.event.action == 'reopened')
+    uses: ./.github/workflows/code-review-welcome.yaml
+    secrets:
+      GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+
+  full-review:
+    name: Full code review
+    if: >-
+      (
+        github.event_name == 'pull_request' &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
+        (
+          github.event.action == 'opened' ||
+          github.event.action == 'reopened' ||
+          github.event.action == 'ready_for_review' ||
+          github.event.action == 'synchronize' ||
+          github.event.action == 'review_requested'
+        )
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+        startsWith(github.event.comment.body, '/review')
+      )
+    uses: ./.github/workflows/code-review-full.yaml
+    with:
+      custom_review_instructions: ${{ inputs.custom_review_instructions }}
+      codex_version: ${{ inputs.codex_version }}
+      codex_model: ${{ inputs.codex_model }}
+      codex_reasoning_effort: ${{ inputs.codex_reasoning_effort }}
+    secrets:
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+      CODEX_REVIEW_GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+
+  respond:
+    name: Conversational @codex response
+    if: >-
+      github.event.comment.user.login != 'jai-bot-reviewer' &&
+      (
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+          contains(github.event.comment.body, '@codex') &&
+          !startsWith(github.event.comment.body, '/')
+        ) ||
+        (
+          github.event_name == 'pull_request_review_comment' &&
+          contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+          contains(github.event.comment.body, '@codex')
+        )
+      )
+    uses: ./.github/workflows/code-review-respond.yaml
+    with:
+      codex_version: ${{ inputs.codex_version }}
+      codex_model: ${{ inputs.codex_model }}
+      codex_reasoning_effort: ${{ inputs.codex_reasoning_effort }}
+    secrets:
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+      CODEX_REVIEW_GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
