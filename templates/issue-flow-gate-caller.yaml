@@ -3,7 +3,7 @@ name: Issue Flow Gate
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize, ready_for_review]
+    types: [opened, edited, labeled, unlabeled, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: read
