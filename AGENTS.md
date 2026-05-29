@@ -28,6 +28,12 @@
 - Avoid compatibility indirection unless explicitly requested.
 - Ship quickly, but keep critical gating checks reliable.
 
+## End-to-End Evidence Standard
+
+- Follow the central `jai/trips` `AGENTS.md` end-to-end evidence standard.
+- Workflow changes must preserve fail-fast CI behavior for production-like E2E checks and must not turn cross-repo feature evidence into sliced-only coverage.
+- For email attachments, the expected CI evidence is a raw RFC822 email with an actual retained attachment flowing through worker ingest, API persistence/download endpoints, frontend UI visibility, and a successful attachment download.
+
 ## Structure
 
 ```
