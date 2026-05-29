@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> **Platform active.** `https://viators.net`, `https://api.viators.net`, and inbound `trips@viators.net` are live. Verify current runtime state before deploy or incident conclusions.
+> **Platform operational source of truth:** the central `jai/trips` repo owns current platform status and the operator manual. Read its `AGENTS.md` and `OPERATOR_MANUAL.md` before deploy or incident work; do not duplicate platform status here.
 
 # AGENTS.md — Trips CI (`jai/trips-ci`)
 
