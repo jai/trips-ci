@@ -1,0 +1,227 @@
+---
+name: Pull Request Validation
+
+on:
+  workflow_call: {}
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+jobs:
+  validate-pr:
+    name: Validate PR
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Validate semantic title
+        uses: amannn/action-semantic-pull-request@v6
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            release
+            revert
+            style
+            test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.notice("No pull_request payload; skipping PR body validation.");
+              return;
+            }
+
+            const title = pr.title || "";
+            const author = pr.user?.login || "";
+            const body = pr.body || "";
+            const bodyWithoutCode = stripMarkdownCode(body);
+            const exemptAuthors = new Set([
+              "dependabot[bot]",
+              "renovate[bot]",
+              "release-please[bot]",
+            ]);
+            const bodyExemptTitle = /^(release|deps)(\(|:|\/|\b)/i.test(title);
+
+            if (bodyExemptTitle || exemptAuthors.has(author)) {
+              core.notice("Skipping strict PR body validation for release/dependency automation.");
+              return;
+            }
+
+            const requiredHeadings = ["## Summary", "## Related Issue", "## Validation"];
+            const errors = [];
+
+            if (!body.trim()) {
+              errors.push("PR body is empty. Use the repository PR template.");
+            }
+
+            if (bodyWithoutCode.includes("\\n") || bodyWithoutCode.includes("\\r")) {
+              errors.push(
+                "PR body contains literal escaped newlines (`\\n` or `\\r`). Use `gh pr create --body-file` for multi-line Markdown.",
+              );
+            }
+
+            if (/<!--/.test(bodyWithoutCode)) {
+              errors.push("PR body still contains template comments. Remove all `<!-- ... -->` guidance.");
+            }
+
+            if (/Closes\s+#\s*$/im.test(bodyWithoutCode) || /<[^>\n]+>/.test(bodyWithoutCode) || /\b(?:TBD|TODO)\b/i.test(bodyWithoutCode)) {
+              errors.push("PR body still contains template placeholder text.");
+            }
+
+            for (const heading of requiredHeadings) {
+              const pattern = new RegExp(`^${escapeRegExp(heading)}\\s*$`, "m");
+              if (!pattern.test(body)) {
+                errors.push(`Missing required heading: ${heading}`);
+              }
+            }
+
+            const headingPositions = requiredHeadings
+              .map((heading) => ({ heading, index: body.search(new RegExp(`^${escapeRegExp(heading)}\\s*$`, "m")) }))
+              .filter((entry) => entry.index >= 0);
+            for (let index = 1; index < headingPositions.length; index += 1) {
+              if (headingPositions[index].index < headingPositions[index - 1].index) {
+                errors.push("Required headings must appear in this order: Summary, Related Issue, Validation.");
+                break;
+              }
+            }
+
+            const allowedHeadings = new Set([
+              "Summary",
+              "Related Issue",
+              "Validation",
+              "Screenshots",
+              "Notes",
+            ]);
+            const headings = [...body.matchAll(/^##\s+(.+?)\s*$/gm)].map((match) => match[1]);
+            for (const heading of headings) {
+              if (!allowedHeadings.has(heading)) {
+                errors.push(
+                  `Unsupported heading: ## ${heading}. Allowed headings: ${[...allowedHeadings].join(", ")}.`,
+                );
+              }
+            }
+
+            const summary = sectionFor(body, "## Summary");
+            if (!hasMeaningfulContent(summary)) {
+              errors.push("`## Summary` must contain at least one real bullet or sentence.");
+            }
+
+            const relatedIssue = sectionFor(body, "## Related Issue");
+            if (!hasMeaningfulContent(relatedIssue)) {
+              errors.push("`## Related Issue` must contain an auto-closing issue reference.");
+            }
+
+            const validation = sectionFor(body, "## Validation");
+            if (!hasMeaningfulContent(validation)) {
+              errors.push("`## Validation` must list commands/checks that were run, or `- [ ] Not run: <reason>`.");
+            }
+
+            if (/\brefs?\s+(?:https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+|#\d+)\b/i.test(bodyWithoutCode)) {
+              errors.push("Use `Closes`, `Fixes`, or `Resolves` for issue references. `Refs` does not auto-close.");
+            }
+
+            const issueRefs = extractClosingIssueRefs(bodyWithoutCode, context.repo);
+            if (issueRefs.length === 0) {
+              errors.push("PR body must include at least one auto-closing issue reference, for example `Closes #123`.");
+            }
+
+            if (issueRefs.length > 0) {
+              for (const issueRef of issueRefs) {
+                try {
+                  const { data } = await github.rest.issues.get({
+                    owner: issueRef.owner,
+                    repo: issueRef.repo,
+                    issue_number: issueRef.number,
+                  });
+                  if (data.pull_request) {
+                    errors.push(`${issueRef.owner}/${issueRef.repo}#${issueRef.number} is a PR, not an issue.`);
+                  }
+                } catch (error) {
+                  errors.push(
+                    `Could not verify linked issue ${issueRef.owner}/${issueRef.repo}#${issueRef.number}: ${error.message}`,
+                  );
+                }
+              }
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(`PR validation failed:\n- ${errors.join("\n- ")}`);
+            }
+
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            }
+
+            function stripMarkdownCode(markdown) {
+              return markdown
+                .replace(/```[\s\S]*?```/g, "")
+                .replace(/`[^`\n]*`/g, "");
+            }
+
+            function sectionFor(markdown, heading) {
+              const pattern = new RegExp(`^${escapeRegExp(heading)}\\s*$`, "m");
+              const match = pattern.exec(markdown);
+              if (!match) return "";
+              const start = match.index + match[0].length;
+              const rest = markdown.slice(start);
+              const nextHeading = rest.search(/^##\s+/m);
+              return (nextHeading >= 0 ? rest.slice(0, nextHeading) : rest).trim();
+            }
+
+            function hasMeaningfulContent(section) {
+              const withoutCodeFences = section.replace(/```[\s\S]*?```/g, "");
+              const withoutEmptyBullets = withoutCodeFences
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line && !/^[-*]\s*(?:\[[ xX]\])?\s*$/.test(line));
+              return withoutEmptyBullets.length > 0 || /```[\s\S]*\S[\s\S]*```/.test(section);
+            }
+
+            function extractClosingIssueRefs(markdown, defaultRepo) {
+              const refs = new Map();
+              const keyword = String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+`;
+              const urlRef = new RegExp(
+                `${keyword}https:\\/\\/github\\.com\\/([A-Za-z0-9_.-]+)\\/([A-Za-z0-9_.-]+)\\/issues\\/(\\d+)`,
+                "gi",
+              );
+              const crossRepoRef = new RegExp(
+                `${keyword}([A-Za-z0-9_.-]+)\\/([A-Za-z0-9_.-]+)#(\\d+)`,
+                "gi",
+              );
+              const localRef = new RegExp(`${keyword}#(\\d+)`, "gi");
+
+              for (const match of markdown.matchAll(urlRef)) {
+                addRef(match[1], match[2], Number.parseInt(match[3], 10));
+              }
+              for (const match of markdown.matchAll(crossRepoRef)) {
+                addRef(match[1], match[2], Number.parseInt(match[3], 10));
+              }
+              for (const match of markdown.matchAll(localRef)) {
+                addRef(defaultRepo.owner, defaultRepo.repo, Number.parseInt(match[1], 10));
+              }
+
+              return [...refs.values()];
+
+              function addRef(owner, repo, number) {
+                if (!Number.isInteger(number) || number <= 0) return;
+                refs.set(`${owner}/${repo}#${number}`, { owner, repo, number });
+              }
+            }

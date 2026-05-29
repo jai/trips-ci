@@ -1,32 +1,14 @@
 ---
-name: Semantic Pull Request
+name: Semantic Pull Request (Compatibility)
 
 on:
   workflow_call: {}
 
 permissions:
+  contents: read
+  issues: read
   pull-requests: write
-  issues: write
 
 jobs:
   validate-pr:
-    name: Validate PR
-    runs-on: ubicloud-standard-2
-    steps:
-      - uses: amannn/action-semantic-pull-request@v6
-        with:
-          types: |
-            build
-            chore
-            ci
-            docs
-            feat
-            fix
-            perf
-            refactor
-            release
-            revert
-            style
-            test
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: jai/trips-ci/.github/workflows/pull-request-validation.yaml@main
