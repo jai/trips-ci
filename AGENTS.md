@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Platform active.** `https://viators.net`, `https://api.viators.net`, and inbound `trips@viators.net` are live. Verify current runtime state before deploy or incident conclusions.
+
 # AGENTS.md — Trips CI (`jai/trips-ci`)
 
 ## Repo Identity
