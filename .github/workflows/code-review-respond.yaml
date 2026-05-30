@@ -38,10 +38,6 @@ jobs:
   respond:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
-    env:
-      # Use the Trips review token so comments are attributed consistently.
-      GITHUB_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
-      GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
     if: |
       (
         github.event_name == 'issue_comment' &&
@@ -57,6 +53,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+          persist-credentials: false
 
       - name: Extract PR number
         id: extract-pr
@@ -204,23 +201,17 @@ jobs:
 
           The user has commented on a specific line of code in ${{ steps.extract-comment.outputs.file_path }} at line ${{ steps.extract-comment.outputs.line_number }}.
 
-          IMPORTANT: To reply to this inline comment, use the following API endpoint:
-          gh api -X POST /repos/${{ github.repository }}/pulls/${{ steps.extract-pr.outputs.pr_number }}/comments \\
-            -f body='Your reply message' \\
-            -F in_reply_to=${{ steps.extract-comment.outputs.comment_id }}
-
           Analyze their comment and respond appropriately:
           - If they're asking a question about the code, answer it directly
           - If they're pointing out an issue, acknowledge and discuss it
           - If they're requesting a change, evaluate and respond
           - Focus on the specific code context they're commenting on
           - Be concise and directly relevant to their comment
-          - Use the in_reply_to parameter to create a threaded reply
 
           CONVERSATIONAL-ONLY RULE (MANDATORY):
           - Never approve a PR and never request changes in this workflow.
           - Never run gh pr review --approve or gh pr review --request-changes.
-          - Only post conversational replies/comments relevant to the user's message."
+          - Do not post comments or call GitHub APIs. Write only the reply body; this workflow posts it deterministically."
           else
             FULL_PROMPT="${BASE_CONTEXT}
 
@@ -239,10 +230,7 @@ jobs:
           CONVERSATIONAL-ONLY RULE (MANDATORY):
           - Never approve a PR and never request changes in this workflow.
           - Never run gh pr review --approve or gh pr review --request-changes.
-          - Only post conversational replies/comments relevant to the user's message.
-
-          IMPORTANT: To respond to this PR comment, use:
-          gh pr comment --body 'Your response here'"
+          - Do not post comments or call GitHub APIs. Write only the reply body; this workflow posts it deterministically."
           fi
 
           echo "prompt<<EOF" >> $GITHUB_OUTPUT
@@ -304,13 +292,13 @@ jobs:
           codex login status
 
       - name: Run Codex response
+        id: run-codex
         if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
         env:
           HOME: ${{ runner.temp }}/codex-home
           CODEX_MODEL: ${{ inputs.codex_model }}
           CODEX_REASONING_EFFORT: ${{ inputs.codex_reasoning_effort }}
-          GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
         run: |
           set -euo pipefail
           prompt_content="$(cat prompt.txt)"
@@ -350,4 +338,36 @@ jobs:
             fi
             exit "$status"
           fi
+          if [ ! -s codex-output.txt ]; then
+            echo "Codex produced an empty response." >&2
+            exit 1
+          fi
           cat codex-output.txt
+
+      - name: Post Codex response
+        if: steps.extract-pr.outputs.has_pr == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+          COMMENT_TYPE: ${{ steps.extract-comment.outputs.comment_type }}
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+          COMMENT_ID: ${{ steps.extract-comment.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s codex-output.txt ]]; then
+            echo "Codex response file is missing or empty." >&2
+            exit 1
+          fi
+
+          if [[ "$COMMENT_TYPE" == "inline_comment" ]]; then
+            response_body="$(cat codex-output.txt)"
+            gh api -X POST "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments" \
+              -f body="$response_body" \
+              -F in_reply_to="$COMMENT_ID" \
+              > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file codex-output.txt
+          fi
