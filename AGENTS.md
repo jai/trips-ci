@@ -38,7 +38,7 @@ trips-ci/
 └── templates/
 ```
 
-- `templates/` holds caller-workflow templates rendered by `scripts/generate-caller-workflows.sh` into each downstream repo's `.github/workflows/`.
+- `templates/` holds caller-workflow templates copied or rendered into each downstream repo's `.github/workflows/`. Today `scripts/generate-caller-workflows.sh` only renders `templates/code-review-caller.yaml` -> `code-review.yaml`; other templates here (e.g. `issue-flow-gate-caller.yaml`) are propagated manually or via other automation.
 
 ## Commands
 
