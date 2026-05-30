@@ -46,7 +46,7 @@ jobs:
           ALLOWED_READY_LABELS: ${{ inputs.allowed_ready_labels || 'implementation-ready,ready' }}
           BLOCKED_LABELS: ${{ inputs.blocked_labels || 'needs-spec,needs-design,requirements-unclear,blocked,not-ready,do-not-start,human-intervention-needed' }}
           EXEMPT_PR_LABELS: ${{ inputs.exempt_pr_labels || 'flow-exempt' }}
-          SKIP_BOT_AUTHORS: ${{ inputs.skip_bot_authors || 'true' }}
+          SKIP_BOT_AUTHORS: ${{ format('{0}', inputs.skip_bot_authors) != 'false' }}
         with:
           github-token: ${{ secrets.CODEX_REVIEW_GH_TOKEN || github.token }}
           script: |

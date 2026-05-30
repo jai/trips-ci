@@ -357,12 +357,13 @@ BLOCKER=Merge conflict
 - **Expected decision path**: No decision parsing occurs (respond workflow has no `parse-review-decision` step).
 - **Expected workflow actions**:
   1. `respond` job runs with conversational prompt.
-  2. Prompt contains `CONVERSATIONAL-ONLY RULE (MANDATORY)`.
-  3. Prompt forbids `gh pr review --approve` and `gh pr review --request-changes`.
-  4. Codex can only post conversational comments.
+  2. `actions/checkout` does not persist the review token into local Git config.
+  3. `Run Codex response` does not receive `GH_TOKEN` or `GITHUB_TOKEN`.
+  4. `respond` uploads the generated body as a short-lived artifact.
+  5. `post-response` runs on a separate runner/job and posts the body as an issue comment or inline reply.
 - **Expected PR outcome**: No review state change. Only conversational reply posted.
 - **Evidence to capture**:
-  - Prompt text contains `Never approve a PR and never request changes`.
+  - Run log shows `Post Codex response`, not a Codex-issued `gh pr review`.
   - No new `APPROVED` or `CHANGES_REQUESTED` reviews from automation user.
 
 #### Validation Playbook
@@ -377,10 +378,11 @@ gh pr comment "$PR_NUMBER" --repo "$REPO" --body "@codex Can you explain the app
 # 2. Wait for respond workflow to complete
 RUN_ID=$(gh run list --repo "$REPO" --workflow "code-review.yaml" --limit 1 --json databaseId -q '.[0].databaseId')
 
-# 3. Static check: verify the respond prompt forbids formal review state changes
-grep -c "Never approve a PR and never request changes" \
-  .github/workflows/code-review-respond.yaml
-# PASS: >= 1
+# 3. Static check: verify Codex cannot inherit the GitHub write token
+grep -n "persist-credentials: false" .github/workflows/code-review-respond.yaml
+grep -n "GH_TOKEN:.*CODEX_REVIEW_GH_TOKEN" .github/workflows/code-review-respond.yaml
+grep -n "^  post-response:" .github/workflows/code-review-respond.yaml
+# PASS: checkout does not persist credentials; GH_TOKEN appears only in the separate post-response job
 
 # 4. Assert: no new review state changes from automation user
 REVIEWS_BEFORE=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq 'length')
