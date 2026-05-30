@@ -38,6 +38,11 @@ jobs:
   respond:
     runs-on: ubicloud-standard-2
     timeout-minutes: 30
+    outputs:
+      has_pr: ${{ steps.extract-pr.outputs.has_pr }}
+      pr_number: ${{ steps.extract-pr.outputs.pr_number }}
+      comment_type: ${{ steps.extract-comment.outputs.comment_type }}
+      comment_id: ${{ steps.extract-comment.outputs.comment_id }}
     if: |
       (
         github.event_name == 'issue_comment' &&
@@ -344,24 +349,45 @@ jobs:
           fi
           cat codex-output.txt
 
-      - name: Post Codex response
+      - name: Upload Codex response
         if: steps.extract-pr.outputs.has_pr == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-response-${{ github.run_id }}-${{ github.run_attempt }}
+          path: codex-output.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  post-response:
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    needs: respond
+    if: needs.respond.outputs.has_pr == 'true'
+    steps:
+      - name: Download Codex response
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-response-${{ github.run_id }}-${{ github.run_attempt }}
+          path: codex-response
+
+      - name: Post Codex response
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
-          COMMENT_TYPE: ${{ steps.extract-comment.outputs.comment_type }}
-          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
-          COMMENT_ID: ${{ steps.extract-comment.outputs.comment_id }}
+          COMMENT_TYPE: ${{ needs.respond.outputs.comment_type }}
+          PR_NUMBER: ${{ needs.respond.outputs.pr_number }}
+          COMMENT_ID: ${{ needs.respond.outputs.comment_id }}
         run: |
           set -euo pipefail
 
-          if [[ ! -s codex-output.txt ]]; then
+          response_file="codex-response/codex-output.txt"
+          if [[ ! -s "$response_file" ]]; then
             echo "Codex response file is missing or empty." >&2
             exit 1
           fi
 
           if [[ "$COMMENT_TYPE" == "inline_comment" ]]; then
-            response_body="$(cat codex-output.txt)"
+            response_body="$(cat "$response_file")"
             gh api -X POST "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments" \
               -f body="$response_body" \
               -F in_reply_to="$COMMENT_ID" \
@@ -369,5 +395,5 @@ jobs:
           else
             gh pr comment "$PR_NUMBER" \
               --repo "$GITHUB_REPOSITORY" \
-              --body-file codex-output.txt
+              --body-file "$response_file"
           fi

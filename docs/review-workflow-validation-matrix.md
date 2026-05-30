@@ -359,7 +359,8 @@ BLOCKER=Merge conflict
   1. `respond` job runs with conversational prompt.
   2. `actions/checkout` does not persist the review token into local Git config.
   3. `Run Codex response` does not receive `GH_TOKEN` or `GITHUB_TOKEN`.
-  4. `Post Codex response` posts the generated body as an issue comment or inline reply.
+  4. `respond` uploads the generated body as a short-lived artifact.
+  5. `post-response` runs on a separate runner/job and posts the body as an issue comment or inline reply.
 - **Expected PR outcome**: No review state change. Only conversational reply posted.
 - **Evidence to capture**:
   - Run log shows `Post Codex response`, not a Codex-issued `gh pr review`.
@@ -380,7 +381,8 @@ RUN_ID=$(gh run list --repo "$REPO" --workflow "code-review.yaml" --limit 1 --js
 # 3. Static check: verify Codex cannot inherit the GitHub write token
 grep -n "persist-credentials: false" .github/workflows/code-review-respond.yaml
 grep -n "GH_TOKEN:.*CODEX_REVIEW_GH_TOKEN" .github/workflows/code-review-respond.yaml
-# PASS: checkout does not persist credentials; GH_TOKEN appears only in the deterministic post step
+grep -n "^  post-response:" .github/workflows/code-review-respond.yaml
+# PASS: checkout does not persist credentials; GH_TOKEN appears only in the separate post-response job
 
 # 4. Assert: no new review state changes from automation user
 REVIEWS_BEFORE=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq 'length')
