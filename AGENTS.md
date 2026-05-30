@@ -6,7 +6,7 @@
 ## Repo Identity
 
 - Shared GitHub Actions workflows for Trips repositories.
-- Typical workflows include semantic PR checks, PR-issue linking, coverage, auto-merge, and code review orchestration.
+- Typical workflows include `pull-request-validation.yaml` (the canonical PR check covering semantic title, PR-issue linking, and required checks), `code-review*.yaml` (Codex review orchestration), `auto-merge.yaml`, `coverage-octocov.yml`, `issue-flow-gate.yaml`, `pr-image-check.yaml`, and `validate-workflows.yaml`.
 
 ## Project Mode (Solo MVP)
 
@@ -34,13 +34,16 @@
 trips-ci/
 ├── .github/workflows/
 ├── docs/
-└── scripts/
+├── scripts/
+└── templates/
 ```
+
+- `templates/` holds caller-workflow templates rendered by `scripts/generate-caller-workflows.sh` into each downstream repo's `.github/workflows/`.
 
 ## Commands
 
-- Validate workflow YAMLs (local checks as needed): `gh workflow list`
-- Trigger/review runs via `gh run list`, `gh run view`, `gh run rerun`
+- `scripts/generate-caller-workflows.sh [--check|--stdout] [target-dir...]` regenerates caller workflows in downstream repos. With no arguments it uses the hardcoded `DEFAULT_TARGETS` (umbrella subrepo paths under `/Users/jai/Developer/trips/`).
+- `scripts/validate-workflows.sh` validates the rendered output.
 
 ## Owner
 
