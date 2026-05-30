@@ -2,11 +2,25 @@
 # Enables auto-merge (squash) on PRs as soon as they're opened.
 # Merge won't happen until all branch protection / ruleset requirements are met.
 # Called by downstream repos via workflow_call.
+#
+# IMPORTANT: callers should pass JAI_CI_PERSONAL_ACCESS_TOKEN via
+# `secrets: inherit` so the eventual squash-merge push to main is
+# authored by the PAT owner instead of GITHUB_TOKEN. Pushes authored
+# by GITHUB_TOKEN do not trigger downstream `push`-triggered workflows
+# (release-please, deploy, etc.), which silently breaks the release
+# pipeline. The secret is optional so callers without a release.yaml
+# can still consume this workflow; when absent, the workflow falls
+# back to github.token (current behavior; downstream workflows will
+# NOT fire on the merge push).
 ---
 name: Auto-Merge
 
 on:
-  workflow_call: {}
+  workflow_call:
+    secrets:
+      JAI_CI_PERSONAL_ACCESS_TOKEN:
+        description: PAT used to author the squash-merge so downstream push-triggered workflows fire. Optional; falls back to github.token if absent.
+        required: false
 
 permissions:
   contents: write
@@ -23,4 +37,4 @@ jobs:
             "${{ github.event.pull_request.number }}" \
             --repo "${{ github.repository }}"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.JAI_CI_PERSONAL_ACCESS_TOKEN || github.token }}
