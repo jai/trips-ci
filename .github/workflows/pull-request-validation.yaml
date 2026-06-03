@@ -2,7 +2,10 @@
 name: Pull Request Validation
 
 on:
-  workflow_call: {}
+  workflow_call:
+    secrets:
+      CODEX_REVIEW_GH_TOKEN:
+        required: false
   pull_request:
     types:
       - opened
@@ -42,6 +45,7 @@ jobs:
       - name: Validate PR body
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.CODEX_REVIEW_GH_TOKEN || github.token }}
           script: |
             const pr = context.payload.pull_request;
             if (!pr) {
