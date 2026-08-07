@@ -117,17 +117,22 @@ jobs:
       - name: Extract PR number
         id: extract-pr
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || '' }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          ISSUE_PULL_REQUEST_URL: ${{ github.event.issue.pull_request.url || '' }}
         run: |
           set -euo pipefail
-          echo "Event: ${{ github.event_name }}"
+          echo "Event: $EVENT_NAME"
 
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            PR_NUMBER="$PULL_REQUEST_NUMBER"
             echo "📋 PR number from pull_request event: $PR_NUMBER"
-          elif [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+          elif [[ "$EVENT_NAME" == "issue_comment" ]]; then
             # For issue_comment events on PRs, PR number is issue.number
-            if [[ "${{ github.event.issue.pull_request }}" != "" ]]; then
-              PR_NUMBER="${{ github.event.issue.number }}"
+            if [[ -n "$ISSUE_PULL_REQUEST_URL" ]]; then
+              PR_NUMBER="$ISSUE_NUMBER"
               echo "💬 PR number from issue_comment event: $PR_NUMBER"
             else
               echo "⚠️ Issue comment is not on a PR, skipping"
@@ -136,8 +141,8 @@ jobs:
               exit 0
             fi
           else
-            echo "⚠️ Could not determine PR number for event: ${{ github.event_name }}"
-            echo "::error::Unsupported event type: ${{ github.event_name }}"
+            echo "⚠️ Could not determine PR number for event: $EVENT_NAME"
+            echo "::error::Unsupported event type: $EVENT_NAME"
             exit 1
           fi
 
@@ -149,11 +154,12 @@ jobs:
         id: fetch-pr
         if: steps.extract-pr.outputs.has_pr == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
         run: |
           set -euo pipefail
 
-          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
-          HEAD_SHA=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER} --jq '.head.sha')
+          HEAD_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')
 
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "✅ PR #${PR_NUMBER} head SHA: ${HEAD_SHA}"
@@ -199,18 +205,12 @@ jobs:
             TRIGGER_DESC="pull_request event (${EVENT_ACTION})"
           fi
 
+          printf '%s' "$SLASH_ARGS" > "$RUNNER_TEMP/full-review-slash-args.txt"
+
           echo "context_type=$CONTEXT_TYPE" >> "$GITHUB_OUTPUT"
           echo "comment_author=$COMMENT_AUTHOR" >> "$GITHUB_OUTPUT"
           echo "trigger_desc=$TRIGGER_DESC" >> "$GITHUB_OUTPUT"
           echo "has_review_trigger=true" >> "$GITHUB_OUTPUT"
-
-          echo "comment_body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$COMMENT_BODY" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          echo "slash_args<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$SLASH_ARGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
           echo "✅ Extracted full-review context: ${CONTEXT_TYPE}"
 
@@ -297,9 +297,7 @@ jobs:
             - Do NOT run 'gh pr review --approve' or 'gh pr review --request-changes'.
             - CI workflow will submit the final review action after parsing this marker."
 
-          echo "instructions<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$REVIEW_INSTRUCTIONS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$REVIEW_INSTRUCTIONS" > "$RUNNER_TEMP/full-review-instructions.txt"
 
           echo "✅ Review instructions defined"
 
@@ -309,30 +307,30 @@ jobs:
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.extract-context.outputs.has_review_trigger == 'true'
         shell: bash
+        env:
+          CUSTOM_REVIEW_INSTRUCTIONS: ${{ inputs.custom_review_instructions }}
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+          CONTEXT_TYPE: ${{ steps.extract-context.outputs.context_type }}
+          TRIGGER_DESC: ${{ steps.extract-context.outputs.trigger_desc }}
+          COMMENT_AUTHOR: ${{ steps.extract-context.outputs.comment_author }}
+          EVENT_ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
 
-          REVIEW_INSTRUCTIONS=$(cat <<'REVIEW_EOF'
-          ${{ steps.review-instructions.outputs.instructions }}
-          REVIEW_EOF
-          )
-
-          CUSTOM_INSTRUCTIONS=$(cat <<'CUSTOM_EOF'
-          ${{ inputs.custom_review_instructions }}
-          CUSTOM_EOF
-          )
+          REVIEW_INSTRUCTIONS=$(cat "$RUNNER_TEMP/full-review-instructions.txt")
+          SLASH_ARGS=$(cat "$RUNNER_TEMP/full-review-slash-args.txt")
           # Trim whitespace-only custom instructions to empty
-          CUSTOM_INSTRUCTIONS=$(printf '%s' "$CUSTOM_INSTRUCTIONS" | sed '/^[[:space:]]*$/d')
+          CUSTOM_INSTRUCTIONS=$(printf '%s' "$CUSTOM_REVIEW_INSTRUCTIONS" | sed '/^[[:space:]]*$/d')
 
-          BASE_CONTEXT="REPO: ${{ github.repository }}
-          PR NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+          BASE_CONTEXT="REPO: ${GITHUB_REPOSITORY}
+          PR NUMBER: ${PR_NUMBER}
 
           ## Trigger Context
-          - **Type**: ${{ steps.extract-context.outputs.context_type }}
-          - **Trigger**: ${{ steps.extract-context.outputs.trigger_desc }}
-          - **Author**: @${{ steps.extract-context.outputs.comment_author }}"
+          - **Type**: ${CONTEXT_TYPE}
+          - **Trigger**: ${TRIGGER_DESC}
+          - **Author**: @${COMMENT_AUTHOR}"
 
-          if [[ "${{ steps.extract-context.outputs.context_type }}" == "slash_review" ]]; then
+          if [[ "$CONTEXT_TYPE" == "slash_review" ]]; then
             FULL_PROMPT="${BASE_CONTEXT}
 
           ## Slash Command
@@ -340,7 +338,7 @@ jobs:
           Treat this as an explicit request for a full review.
 
           Additional user instructions from /review (if any):
-          ${{ steps.extract-context.outputs.slash_args }}
+          ${SLASH_ARGS}
 
           ${CUSTOM_INSTRUCTIONS:+## Project-Specific Review Criteria
           ${CUSTOM_INSTRUCTIONS}
@@ -352,7 +350,7 @@ jobs:
           else
             FULL_PROMPT="${BASE_CONTEXT}
 
-          This PR event was triggered by action: ${{ github.event.action }}.
+          This PR event was triggered by action: ${EVENT_ACTION}.
           ${CUSTOM_INSTRUCTIONS:+
           ## Project-Specific Review Criteria
           ${CUSTOM_INSTRUCTIONS}
@@ -360,9 +358,6 @@ jobs:
           ${REVIEW_INSTRUCTIONS}"
           fi
 
-          echo "prompt<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$FULL_PROMPT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$FULL_PROMPT" > prompt.txt
 
           echo "✅ Crafted full-review prompt"
@@ -445,6 +440,7 @@ jobs:
           CODEX_MODEL: ${{ inputs.codex_model }}
           CODEX_REASONING_EFFORT: ${{ inputs.codex_reasoning_effort }}
           GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
         run: |
           set -euo pipefail
           prompt_content="$(cat prompt.txt)"
@@ -463,7 +459,7 @@ jobs:
           {
             echo "## Codex Full Code Review"
             echo
-            echo "- PR: #${{ steps.extract-pr.outputs.pr_number }}"
+            echo "- PR: #${PR_NUMBER}"
             echo "- Model: $CODEX_MODEL"
             echo "- Reasoning effort: $CODEX_REASONING_EFFORT"
             echo "- Exit code: $status"
@@ -493,11 +489,12 @@ jobs:
           steps.extract-context.outputs.has_review_trigger == 'true' &&
           steps.run-codex.outcome == 'failure'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
         run: |
           set -euo pipefail
 
-          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
-          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
           BLOCKER="Codex full-review execution crashed before emitting a structured decision marker (see run log: ${RUN_URL})."
           NEXT_ACTION="Re-run /review on this PR after Codex auth/service recovers; if persistent, investigate the failing run logs and workflow inputs."
@@ -519,6 +516,9 @@ jobs:
           steps.extract-pr.outputs.has_pr == 'true' &&
           steps.extract-context.outputs.has_review_trigger == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+          RUN_STARTED_AT: ${{ steps.review-started-at.outputs.started_at }}
         run: |
           set -euo pipefail
 
@@ -526,11 +526,9 @@ jobs:
             sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
           }
 
-          PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
-          RUN_STARTED_AT="${{ steps.review-started-at.outputs.started_at }}"
           AUTOMATION_LOGIN=$(gh api user --jq '.login')
 
-          COMMENTS_JSON=$(gh api repos/${{ github.repository }}/issues/${PR_NUMBER}/comments --paginate)
+          COMMENTS_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate)
 
           mapfile -t CANDIDATES < <(
             printf '%s' "$COMMENTS_JSON" | jq -r \
@@ -593,13 +591,24 @@ jobs:
           echo "decision_found=${DECISION_FOUND}" >> "$GITHUB_OUTPUT"
           echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
 
-          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$BLOCKER" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          write_multiline_output() {
+            local name="$1"
+            local value="$2"
+            local delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
 
-          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$NEXT_ACTION" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+            while printf '%s\n' "$value" | grep -Fqx "$delimiter"; do
+              delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
+            done
+
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          write_multiline_output "blocker" "$BLOCKER"
+          write_multiline_output "next_action" "$NEXT_ACTION"
 
           if [[ "$DECISION_FOUND" == "true" ]]; then
             echo "✅ Parsed decision marker: ${DECISION}"
@@ -612,6 +621,14 @@ jobs:
         id: set-outputs
         if: always()
         shell: bash
+        env:
+          HAS_PR: ${{ steps.extract-pr.outputs.has_pr || 'false' }}
+          EXTRACTED_PR_NUMBER: ${{ steps.extract-pr.outputs.pr_number }}
+          FETCHED_HEAD_SHA: ${{ steps.fetch-pr.outputs.head_sha }}
+          PARSED_DECISION_FOUND: ${{ steps.parse-review-decision.outputs.decision_found || 'false' }}
+          PARSED_DECISION: ${{ steps.parse-review-decision.outputs.decision }}
+          PARSED_BLOCKER: ${{ steps.parse-review-decision.outputs.blocker }}
+          PARSED_NEXT_ACTION: ${{ steps.parse-review-decision.outputs.next_action }}
         run: |
           set -euo pipefail
 
@@ -624,17 +641,17 @@ jobs:
           FOUND_ALIAS="false"
           READY_ALIAS="false"
 
-          if [[ "${{ steps.extract-pr.outputs.has_pr || 'false' }}" == "true" ]]; then
-            PR_NUMBER="${{ steps.extract-pr.outputs.pr_number }}"
-            HEAD_SHA="${{ steps.fetch-pr.outputs.head_sha }}"
+          if [[ "$HAS_PR" == "true" ]]; then
+            PR_NUMBER="$EXTRACTED_PR_NUMBER"
+            HEAD_SHA="$FETCHED_HEAD_SHA"
           fi
 
-          if [[ "${{ steps.parse-review-decision.outputs.decision_found || 'false' }}" == "true" ]]; then
+          if [[ "$PARSED_DECISION_FOUND" == "true" ]]; then
             DECISION_FOUND="true"
             FOUND_ALIAS="true"
-            DECISION="${{ steps.parse-review-decision.outputs.decision }}"
-            BLOCKER="${{ steps.parse-review-decision.outputs.blocker }}"
-            NEXT_ACTION="${{ steps.parse-review-decision.outputs.next_action }}"
+            DECISION="$PARSED_DECISION"
+            BLOCKER="$PARSED_BLOCKER"
+            NEXT_ACTION="$PARSED_NEXT_ACTION"
             if [[ "$DECISION" == "APPROVE" ]]; then
               READY_ALIAS="true"
             fi
@@ -643,13 +660,24 @@ jobs:
           echo "decision_found=${DECISION_FOUND}" >> "$GITHUB_OUTPUT"
           echo "decision=${DECISION}" >> "$GITHUB_OUTPUT"
 
-          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$BLOCKER" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          write_multiline_output() {
+            local name="$1"
+            local value="$2"
+            local delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
 
-          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$NEXT_ACTION" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+            while printf '%s\n' "$value" | grep -Fqx "$delimiter"; do
+              delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
+            done
+
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          write_multiline_output "blocker" "$BLOCKER"
+          write_multiline_output "next_action" "$NEXT_ACTION"
 
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
@@ -685,14 +713,16 @@ jobs:
       - name: Fetch PR metadata
         id: pr-meta
         shell: bash
+        env:
+          PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+          DECISION: ${{ needs.review.outputs.decision }}
+          BLOCKER: ${{ needs.review.outputs.blocker }}
+          NEXT_ACTION: ${{ needs.review.outputs.next_action }}
         run: |
           set -euo pipefail
 
-          PR_NUMBER="${{ needs.review.outputs.pr_number }}"
-          INPUT_HEAD_SHA="${{ needs.review.outputs.head_sha }}"
-          DECISION="${{ needs.review.outputs.decision }}"
-
-          PR_JSON=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER})
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
 
           IS_DRAFT=$(printf '%s' "$PR_JSON" | jq -r '.draft')
           HEAD_REF=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
@@ -721,22 +751,34 @@ jobs:
           echo "automation_login=${AUTOMATION_LOGIN}" >> "$GITHUB_OUTPUT"
           echo "can_submit_approval=${CAN_SUBMIT_APPROVAL}" >> "$GITHUB_OUTPUT"
 
-          echo "blocker<<EOF" >> "$GITHUB_OUTPUT"
-          echo "${{ needs.review.outputs.blocker }}" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          write_multiline_output() {
+            local name="$1"
+            local value="$2"
+            local delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
 
-          echo "next_action<<EOF" >> "$GITHUB_OUTPUT"
-          echo "${{ needs.review.outputs.next_action }}" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+            while printf '%s\n' "$value" | grep -Fqx "$delimiter"; do
+              delimiter="ghadelimiter_${RANDOM}_${RANDOM}_$$"
+            done
+
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          write_multiline_output "blocker" "$BLOCKER"
+          write_multiline_output "next_action" "$NEXT_ACTION"
 
       - name: Compute unresolved review-thread counts (paginate all pages)
         id: thread-counts
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
         run: |
           set -euo pipefail
 
-          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
-          OWNER="${{ github.repository_owner }}"
+          OWNER="$GITHUB_REPOSITORY_OWNER"
           REPO="${GITHUB_REPOSITORY#*/}"
 
           QUERY='query($owner:String!, $repo:String!, $number:Int!, $after:String) {
@@ -804,11 +846,11 @@ jobs:
       - name: Enforce approval precondition (unresolved threads must be zero)
         if: steps.pr-meta.outputs.decision == 'APPROVE'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          UNRESOLVED_THREADS: ${{ steps.thread-counts.outputs.unresolved_threads }}
         run: |
           set -euo pipefail
-
-          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
-          UNRESOLVED_THREADS="${{ steps.thread-counts.outputs.unresolved_threads }}"
 
           if [[ "$UNRESOLVED_THREADS" -gt 0 ]]; then
             echo "::error::DECISION=APPROVE requires unresolved_threads=0, but PR #${PR_NUMBER} has ${UNRESOLVED_THREADS} unresolved review thread(s)."
@@ -822,18 +864,23 @@ jobs:
           steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.is_draft == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
         run: |
           set -euo pipefail
-          gh pr ready "${{ steps.pr-meta.outputs.pr_number }}" --repo "${{ github.repository }}"
+          gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
 
       - name: Skip CI trigger commit for fork PRs
         if: |
           steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo != github.repository
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          HEAD_REPO: ${{ steps.pr-meta.outputs.head_repo }}
         run: |
           set -euo pipefail
-          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} head repo is ${{ steps.pr-meta.outputs.head_repo }}; skipping empty commit because branch is not local to target repo."
+          echo "::notice::PR #${PR_NUMBER} head repo is ${HEAD_REPO}; skipping empty commit because branch is not local to target repo."
 
       - name: Evaluate check runs for trigger-commit eligibility
         id: checks
@@ -841,12 +888,12 @@ jobs:
           steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.head_repo == github.repository
         shell: bash
+        env:
+          HEAD_SHA: ${{ steps.pr-meta.outputs.head_sha }}
         run: |
           set -euo pipefail
 
-          HEAD_SHA="${{ steps.pr-meta.outputs.head_sha }}"
-
-          CHECKS_JSON=$(gh api repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs)
+          CHECKS_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs")
           TOTAL_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '.total_count // 0')
           ACTION_REQUIRED_CHECKS=$(printf '%s' "$CHECKS_JSON" | jq -r '[.check_runs[]? | select(.conclusion == "action_required")] | length')
 
@@ -872,9 +919,12 @@ jobs:
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger != 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          TOTAL_CHECKS: ${{ steps.checks.outputs.total_checks }}
         run: |
           set -euo pipefail
-          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} has checks (${{ steps.checks.outputs.total_checks }}) and none are action_required. Skipping empty commit."
+          echo "::notice::PR #${PR_NUMBER} has checks (${TOTAL_CHECKS}) and none are action_required. Skipping empty commit."
 
       - name: Prevent duplicate trigger commit
         id: duplicate-commit
@@ -883,12 +933,12 @@ jobs:
           steps.pr-meta.outputs.head_repo == github.repository &&
           steps.checks.outputs.should_trigger == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
         run: |
           set -euo pipefail
 
-          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
-
-          TRIGGER_COMMIT_COUNT=$(gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits --paginate \
+          TRIGGER_COMMIT_COUNT=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" --paginate \
             | jq -rs '[.[] | .[] | .commit.message | split("\n")[0] | select(startswith("ci: trigger checks after codex review decision"))] | length')
 
           if [[ "$TRIGGER_COMMIT_COUNT" -gt 0 ]]; then
@@ -904,9 +954,11 @@ jobs:
           steps.checks.outputs.should_trigger == 'true' &&
           steps.duplicate-commit.outputs.already_triggered == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
         run: |
           set -euo pipefail
-          echo "::notice::PR #${{ steps.pr-meta.outputs.pr_number }} already has a CI trigger empty commit. Skipping additional empty commit."
+          echo "::notice::PR #${PR_NUMBER} already has a CI trigger empty commit. Skipping additional empty commit."
 
       - name: Push empty commit to trigger CI checks
         if: |
@@ -915,12 +967,14 @@ jobs:
           steps.checks.outputs.should_trigger == 'true' &&
           steps.duplicate-commit.outputs.already_triggered != 'true'
         shell: bash
+        env:
+          HEAD_REF: ${{ steps.pr-meta.outputs.head_ref }}
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          TRIGGER_REASON: ${{ steps.checks.outputs.trigger_reason }}
         run: |
           set -euo pipefail
 
-          HEAD_REF="${{ steps.pr-meta.outputs.head_ref }}"
-
-          echo "ℹ️ PR #${{ steps.pr-meta.outputs.pr_number }}: ${{ steps.checks.outputs.trigger_reason }}. Pushing one empty commit to trigger CI."
+          echo "ℹ️ PR #${PR_NUMBER}: ${TRIGGER_REASON}. Pushing one empty commit to trigger CI."
 
           git config user.name "Codex PR Assistant"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -935,19 +989,23 @@ jobs:
           steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.can_submit_approval != 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          AUTOMATION_LOGIN: ${{ steps.pr-meta.outputs.automation_login }}
+          PR_AUTHOR_LOGIN: ${{ steps.pr-meta.outputs.pr_author_login }}
         run: |
           set -euo pipefail
-          echo "::notice::Skipping workflow-owned approval for PR #${{ steps.pr-meta.outputs.pr_number }} because @${{ steps.pr-meta.outputs.automation_login }} cannot approve their own pull request (@${{ steps.pr-meta.outputs.pr_author_login }})."
+          echo "::notice::Skipping workflow-owned approval for PR #${PR_NUMBER} because @${AUTOMATION_LOGIN} cannot approve their own pull request (@${PR_AUTHOR_LOGIN})."
 
       - name: Submit workflow-owned APPROVED review
         if: |
           steps.pr-meta.outputs.decision == 'APPROVE' &&
           steps.pr-meta.outputs.can_submit_approval == 'true'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
         run: |
           set -euo pipefail
-
-          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
 
           set +e
           REVIEW_OUTPUT=$(gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
@@ -968,12 +1026,12 @@ jobs:
       - name: Submit workflow-owned REQUEST_CHANGES review
         if: steps.pr-meta.outputs.decision == 'REQUEST_CHANGES'
         shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          BLOCKER: ${{ steps.pr-meta.outputs.blocker }}
+          NEXT_ACTION: ${{ steps.pr-meta.outputs.next_action }}
         run: |
           set -euo pipefail
-
-          PR_NUMBER="${{ steps.pr-meta.outputs.pr_number }}"
-          BLOCKER="${{ steps.pr-meta.outputs.blocker }}"
-          NEXT_ACTION="${{ steps.pr-meta.outputs.next_action }}"
 
           REVIEW_BODY=$(printf 'BLOCKED: %s\nNext action: %s' "$BLOCKER" "$NEXT_ACTION")
 
