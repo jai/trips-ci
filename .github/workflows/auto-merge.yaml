@@ -28,7 +28,7 @@ permissions:
 jobs:
   enable-auto-merge:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     steps:
       - name: Enable auto-merge (squash)
         run: |

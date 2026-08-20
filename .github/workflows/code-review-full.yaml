@@ -77,7 +77,7 @@ permissions:
 
 jobs:
   review:
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     timeout-minutes: 30
     env:
       # Use the Trips review token so review comments and formal reviews are attributed consistently.
@@ -692,7 +692,7 @@ jobs:
     name: Review Orchestration
     needs: review
     if: ${{ needs.review.outputs.decision_found == 'true' }}
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     timeout-minutes: 15
     permissions:
       contents: write

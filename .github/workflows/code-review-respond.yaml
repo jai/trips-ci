@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   respond:
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     timeout-minutes: 30
     outputs:
       has_pr: ${{ steps.extract-pr.outputs.has_pr }}
@@ -359,7 +359,7 @@ jobs:
           retention-days: 1
 
   post-response:
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     timeout-minutes: 10
     needs: respond
     if: needs.respond.outputs.has_pr == 'true'

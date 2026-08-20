@@ -14,7 +14,7 @@ permissions:
 jobs:
   validate-images:
     name: Validate PR Images
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     steps:
       - name: Check PR markdown image URLs
         env:
