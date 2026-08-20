@@ -103,13 +103,43 @@ delete_vm() {
   /opt/homebrew/bin/tart delete "$vm_name" >/dev/null 2>&1 || true
 }
 
+runner_id() {
+  local repository="$1" runner_name="$2"
+  /opt/homebrew/bin/gh api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/${repository}/actions/runners?per_page=100" \
+    --jq ".runners[] | select(.name == \"${runner_name}\") | .id"
+}
+
+runner_is_busy() {
+  local repository="$1" runner_name="$2"
+  /opt/homebrew/bin/gh api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/${repository}/actions/runners?per_page=100" \
+    --jq ".runners[] | select(.name == \"${runner_name}\") | .busy" |
+    /usr/bin/grep -qx 'true'
+}
+
+delete_runner_registration() {
+  local repository="$1" runner_name="$2" id
+  id=$(runner_id "$repository" "$runner_name") || return 0
+  [[ -n "$id" ]] || return 0
+  /opt/homebrew/bin/gh api --method DELETE \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/${repository}/actions/runners/${id}" >/dev/null
+}
+
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status ssh_ready
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   vm_pid=""
+  runner_pid=""
   runner_status=1
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
@@ -157,8 +187,31 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh"
-    runner_status=$?
+      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh" &
+    runner_pid=$!
+    runner_claimed=false
+    for _ in {1..150}; do
+      if ! /bin/kill -0 "$runner_pid" 2>/dev/null; then
+        wait "$runner_pid"
+        runner_status=$?
+        runner_claimed=true
+        break
+      fi
+      if runner_is_busy "$repository" "$runner_name"; then
+        runner_claimed=true
+        wait "$runner_pid"
+        runner_status=$?
+        break
+      fi
+      /bin/sleep 2
+    done
+    if [[ "$runner_claimed" == false ]]; then
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      delete_runner_registration "$repository" "$runner_name" || true
+      runner_status=0
+    fi
   } always {
     trap - INT TERM
     cleanup_vm
