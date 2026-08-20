@@ -4,12 +4,11 @@
 <dict>
   <key>Label</key><string>com.jai.trips-tart-runner</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/jai/.local/bin/trips-tart-runner-controller</string></array>
+  <array><string>/Users/jai/.local/bin/start-trips-tart-runner.command</string></array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>StartInterval</key><integer>60</integer>
   <key>ProcessType</key><string>Background</string>
-  <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>/Users/jai/Library/Logs/trips-tart-runner/controller.log</string>
-  <key>StandardErrorPath</key><string>/Users/jai/Library/Logs/trips-tart-runner/controller.err</string>
+  <key>StandardOutPath</key><string>/Users/jai/Library/Logs/trips-tart-runner/launcher.log</string>
+  <key>StandardErrorPath</key><string>/Users/jai/Library/Logs/trips-tart-runner/launcher.err</string>
 </dict>
 </plist>
