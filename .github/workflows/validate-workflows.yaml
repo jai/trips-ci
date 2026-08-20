@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubicloud-standard-2
+    runs-on: [self-hosted, linux, arm64, jai-ci]
     steps:
       - uses: actions/checkout@v4
 
