@@ -3,18 +3,23 @@ set -u
 
 PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-readonly app_id="4452026"
-readonly installation_id="150444191"
-readonly repository="jai/trips-frontend"
-readonly base_vm="trips-runner-base"
+readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
+readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
+readonly repository="${TRIPS_TART_REPOSITORY:-jai/trips-frontend}"
+readonly base_vm="${TRIPS_TART_BASE_VM:-trips-runner-base}"
 readonly runner_root="/Users/admin/actions-runner"
-readonly runner_labels="borg-cube-03,tart,ios"
+readonly runner_host_label="${TRIPS_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
+readonly runner_name_prefix="${TRIPS_TART_RUNNER_NAME_PREFIX:-${runner_host_label}}"
+readonly runner_labels="${runner_host_label},tart,ios"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
-readonly work_disk_directory="/Users/jai/.local/share/trips-tart-runner/work-disks"
+readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-tart-runner/work-disks}"
+readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 
-mkdir -p "$log_directory" "$work_disk_directory"
+export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
+
+mkdir -p "$log_directory"
 
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -69,7 +74,7 @@ run_one_ephemeral_runner() {
   local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status work_disk ssh_ready
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
-  runner_name="borg-cube-03-${suffix}"
+  runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   work_disk="${work_disk_directory}/${vm_name}.raw"
   vm_pid=""
@@ -143,6 +148,11 @@ run_one_ephemeral_runner() {
 
 main() {
   umask 077
+  if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
+    log "required volume ${required_volume} is not mounted"
+    return 1
+  fi
+  mkdir -p "$work_disk_directory"
   if [[ ! -s "$private_key" || ! -s "$ssh_key" ]]; then
     log "required runner credential is missing"
     return 1
