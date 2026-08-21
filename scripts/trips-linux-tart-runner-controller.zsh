@@ -133,7 +133,7 @@ delete_runner_registration() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready ios_runner_count linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -141,6 +141,20 @@ run_one_ephemeral_runner() {
   vm_pid=""
   runner_pid=""
   runner_status=1
+
+  while true; do
+    ios_runner_count=$(
+      /opt/homebrew/bin/tart list --source local --quiet |
+        /usr/bin/grep -c '^trips-runner-job-' || true
+    )
+    linux_runner_count=$(
+      /opt/homebrew/bin/tart list --source local --quiet |
+        /usr/bin/grep -c '^trips-linux-runner-job-' || true
+    )
+    (( ios_runner_count == 0 || linux_runner_count == 0 )) && break
+    log "waiting because an iOS VM and a Linux runner are already active"
+    /bin/sleep 15
+  done
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
