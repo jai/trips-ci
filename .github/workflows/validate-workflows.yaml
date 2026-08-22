@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -33,7 +33,7 @@ jobs:
           set -euo pipefail
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.11
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck zsh
 
       - name: Validate workflow library
         shell: bash

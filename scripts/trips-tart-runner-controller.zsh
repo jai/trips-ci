@@ -7,6 +7,8 @@ readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repository="${TRIPS_TART_REPOSITORY:-jai/trips-frontend}"
 readonly base_vm="${TRIPS_TART_BASE_VM:-trips-runner-base}"
+readonly base_cpus="${TRIPS_TART_BASE_CPUS:-4}"
+readonly base_memory_mb="${TRIPS_TART_BASE_MEMORY_MB:-16384}"
 readonly runner_root="/Users/admin/actions-runner"
 readonly runner_host_label="${TRIPS_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
 readonly runner_name_prefix="${TRIPS_TART_RUNNER_NAME_PREFIX:-${runner_host_label}}"
@@ -64,6 +66,40 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
+installation_token() {
+  local jwt
+  jwt=$(github_jwt) || return 1
+  /usr/bin/curl -fsS -X POST \
+    -H "Authorization: Bearer $jwt" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/app/installations/${installation_id}/access_tokens" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+}
+
+runner_id() {
+  local runner_name="$1" token
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
+    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; print(next((str(r["id"]) for r in json.load(sys.stdin)["runners"] if r["name"] == name), ""))' "$runner_name"
+}
+
+delete_runner_registration() {
+  local runner_name="$1" id token
+  id=$(runner_id "$runner_name") || return 0
+  [[ -n "$id" ]] || return 0
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS -X DELETE \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
+}
+
 delete_vm() {
   local vm_name="$1"
   /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
@@ -82,11 +118,12 @@ run_one_ephemeral_runner() {
 
   while true; do
     linux_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-linux-runner-job-' || true
+      /opt/homebrew/bin/limactl list --json 2>/dev/null |
+        /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]' |
+        /usr/bin/grep -c '^trips-linux-runner-[ab]-job-' || true
     )
-    (( linux_runner_count <= 1 )) && break
-    log "waiting for Linux runner count to drop below two"
+    (( linux_runner_count <= 2 )) && break
+    log "waiting for Linux runner count to return to the two-slot contract"
     /bin/sleep 15
   done
 
@@ -94,6 +131,7 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
+    delete_runner_registration "$runner_name" || true
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
     /bin/rm -f "$work_disk"
@@ -133,7 +171,7 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      'set -e; root_store=$(diskutil info / | awk -F: '\''/APFS Physical Store/{gsub(/ /, "", $2); print $2; exit}'\''); root_device=$(printf "%s" "$root_store" | sed -E "s/s[0-9]+$//"); work_device=$(diskutil list physical | awk '\''/^\/dev\/disk[0-9]+ /{gsub("/dev/", "", $1); print $1}'\'' | grep -v "^${root_device}$"); test "$(printf "%s\n" "$work_device" | wc -l | tr -d " ")" = 1; printf "%s\n" "$root_device" "$work_device" | while IFS= read -r device; do printf "%s\n" "$device" | grep -Eq "^disk[0-9]+$" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT "/dev/$work_device" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q "iOS"; then runtime_ready=true; break; fi; sleep 2; done; [ "$runtime_ready" = true ]; launchctl kill SIGKILL "gui/$(id -u)/com.apple.CoreSimulator.CoreSimulatorService" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/Library/Caches /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag' || return 1
+      'set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test "$(df -g / | awk '\''NR == 2 {print $4}'\'')" -ge 20; root_store=$(diskutil info / | awk -F: '\''/APFS Physical Store/{gsub(/ /, "", $2); print $2; exit}'\''); root_device=$(printf "%s" "$root_store" | sed -E "s/s[0-9]+$//"); work_device=$(diskutil list physical | awk '\''/^\/dev\/disk[0-9]+ /{gsub("/dev/", "", $1); print $1}'\'' | grep -v "^${root_device}$"); test "$(printf "%s\n" "$work_device" | wc -l | tr -d " ")" = 1; printf "%s\n" "$root_device" "$work_device" | while IFS= read -r device; do printf "%s\n" "$device" | grep -Eq "^disk[0-9]+$" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT "/dev/$work_device" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q "iOS"; then runtime_ready=true; break; fi; sleep 2; done; [ "$runtime_ready" = true ]; launchctl kill SIGKILL "gui/$(id -u)/com.apple.CoreSimulator.CoreSimulatorService" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/Library/Caches /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag' || return 1
 
     token=$(registration_token) || return 1
     log "registering ${runner_name}"
@@ -169,6 +207,14 @@ main() {
   fi
   if ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
     log "base VM ${base_vm} is missing"
+    return 1
+  fi
+  if [[ "$base_cpus" != 4 || "$base_memory_mb" != 16384 ]]; then
+    log "resource contract requires 4 CPUs and 16384 MB for iOS"
+    return 1
+  fi
+  if ! /opt/homebrew/bin/tart set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
+    log "failed to apply the iOS base resource contract"
     return 1
   fi
 
