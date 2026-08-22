@@ -64,24 +64,28 @@ registration_token() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_id
-  while IFS= read -r run_id; do
-    [[ -n "$run_id" ]] || continue
-    if /opt/homebrew/bin/gh api \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-      --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
-      /usr/bin/grep -qxv '0'; then
-      return 0
-    fi
-  done < <(
+  local repository="$1" run_id run_ids queued_job_count
+  run_ids=$(
     /opt/homebrew/bin/gh api \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
       "repos/${repository}/actions/runs?per_page=30" \
       --jq '.workflow_runs[] | select(.status == "queued" or .status == "in_progress") | .id'
-  )
+  ) || return 1
+
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    queued_job_count=$(
+      /opt/homebrew/bin/gh api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+      --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length'
+    ) || continue
+    if [[ "$queued_job_count" == <1-> ]]; then
+      return 0
+    fi
+  done <<<"$run_ids"
   return 1
 }
 
@@ -277,7 +281,7 @@ main() {
   while true; do
     if repository=$(next_repository); then
       if run_one_ephemeral_runner "$repository"; then
-        log "ephemeral runner completed a job for ${repository}"
+        log "ephemeral runner cycle completed for ${repository}"
       else
         log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
         /bin/sleep 15
