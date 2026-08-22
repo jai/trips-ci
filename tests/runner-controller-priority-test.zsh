@@ -35,6 +35,12 @@ TRIPS_TART_LANE_POLL_SECONDS=0 \
     [[ $? == 2 ]]
     [[ "$lane_released" == true ]]
 
+    wait_for_runner_shutdown() { return 1; }
+    runner_process_state() { print worker; }
+    typeset -g cleanup_allowed=true
+    ! supervise_claimed_runner 192.0.2.1
+    [[ "$cleanup_allowed" == false ]]
+
     acquire_lane_lock() { return 0; }
     shared_lane_has_ephemeral_vm() { return 0; }
     lane_released=false
@@ -59,6 +65,12 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     sleep() { return 0; }
     [[ "$(reconcile_stale_runner_state 192.0.2.1 listener)" == absent ]]
     [[ "$(reconcile_stale_runner_state 192.0.2.1 worker)" == worker ]]
+
+    wait_for_runner_shutdown() { return 1; }
+    runner_process_state() { print worker; }
+    typeset -g cleanup_allowed=true
+    ! supervise_claimed_runner 192.0.2.1
+    [[ "$cleanup_allowed" == false ]]
 
     github_api() {
       local method="$1" endpoint="$2"

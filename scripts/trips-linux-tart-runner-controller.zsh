@@ -283,6 +283,17 @@ wait_for_runner_shutdown() {
   fi
 }
 
+supervise_claimed_runner() {
+  local vm_ip="$1" state
+  wait_for_runner_shutdown "$vm_ip" && return 0
+  state=$(runner_process_state "$vm_ip")
+  if [[ "$state" != absent ]]; then
+    log "preserving claimed runner after supervision ended; live state is ${state}"
+    cleanup_allowed=false
+  fi
+  return 1
+}
+
 delete_runner_registration() {
   local repository="$1" runner_name="$2" id
   id=$(runner_id "$repository" "$runner_name") || return 0
@@ -372,7 +383,7 @@ run_one_ephemeral_runner() {
       state=$(runner_process_state "$vm_ip")
       if [[ "$state" == worker ]]; then
         runner_claimed=true
-        if wait_for_runner_shutdown "$vm_ip"; then
+        if supervise_claimed_runner "$vm_ip"; then
           runner_status=0
         else
           runner_status=1
@@ -401,12 +412,12 @@ run_one_ephemeral_runner() {
         /bin/sleep 5
       done
       if [[ "$runner_claimed" == true ]]; then
-        wait_for_runner_shutdown "$vm_ip" && runner_status=0 || runner_status=1
+        supervise_claimed_runner "$vm_ip" && runner_status=0 || runner_status=1
       elif (( missing_count >= 6 )); then
         registration_state=$(runner_registration_state "$repository" "$runner_name")
         if [[ "$registration_state" == busy ]]; then
           runner_claimed=true
-          wait_for_runner_shutdown "$vm_ip" && runner_status=0 || runner_status=1
+          supervise_claimed_runner "$vm_ip" && runner_status=0 || runner_status=1
         elif [[ "$registration_state" == idle || "$registration_state" == missing ]]; then
           log "${runner_name} drained without accepting a job; removing it"
           delete_runner_registration "$repository" "$runner_name" || true
@@ -424,7 +435,10 @@ run_one_ephemeral_runner() {
     fi
   } always {
     trap - INT TERM
-    cleanup_vm || runner_status=1
+    if ! cleanup_vm; then
+      cleanup_allowed=false
+      runner_status=1
+    fi
     if [[ "$cleanup_allowed" == true && -n "$vm_pid" ]]; then
       wait "$vm_pid" >/dev/null 2>&1 || true
     fi
