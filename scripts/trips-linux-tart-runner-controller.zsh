@@ -113,14 +113,16 @@ runner_id() {
     --jq ".runners[] | select(.name == \"${runner_name}\") | .id"
 }
 
-runner_is_busy() {
-  local repository="$1" runner_name="$2"
-  /opt/homebrew/bin/gh api \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "repos/${repository}/actions/runners?per_page=100" \
-    --jq ".runners[] | select(.name == \"${runner_name}\") | .busy" |
-    /usr/bin/grep -qx 'true'
+runner_worker_started() {
+  local vm_ip="$1"
+  /usr/bin/ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=3 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -i "$ssh_key" \
+    "admin@${vm_ip}" \
+    "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null" 2>/dev/null
 }
 
 delete_runner_registration() {
@@ -212,7 +214,11 @@ run_one_ephemeral_runner() {
         runner_claimed=true
         break
       fi
-      if runner_is_busy "$repository" "$runner_name"; then
+      # GitHub's runner busy flag can become true before the broker actually
+      # starts a job, and can remain stale when dispatch fails. Only the worker
+      # process proves this VM accepted executable work; otherwise keep the
+      # bounded idle timer running and recycle the runner after five minutes.
+      if runner_worker_started "$vm_ip"; then
         runner_claimed=true
         wait "$runner_pid"
         runner_status=$?
