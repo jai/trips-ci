@@ -18,6 +18,7 @@ readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.loca
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
 readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
+readonly native_priority_file="${TRIPS_TART_NATIVE_PRIORITY_FILE:-/Users/jai/Library/Logs/trips-tart-runner-native-priority}"
 
 typeset -g github_installation_token=""
 typeset -g github_installation_token_expires_at=0
@@ -60,6 +61,18 @@ acquire_controller_lock() { acquire_lock "$lock_directory"; }
 release_controller_lock() { release_lock "$lock_directory"; }
 acquire_lane_lock() { acquire_lock "$lane_lock_directory"; }
 release_lane_lock() { release_lock "$lane_lock_directory"; }
+
+request_native_lane_priority() {
+  local candidate="${native_priority_file}.$$"
+  printf '%s\n' $$ >"$candidate"
+  /bin/mv -f "$candidate" "$native_priority_file"
+}
+
+release_native_lane_priority() {
+  local owner_pid=""
+  [[ -r "$native_priority_file" ]] && read -r owner_pid <"$native_priority_file"
+  [[ "$owner_pid" != $$ ]] || /bin/rm -f "$native_priority_file"
+}
 
 base64url() {
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
@@ -109,6 +122,25 @@ registration_token() {
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+}
+
+repository_has_queued_native_job() {
+  local run_id run_ids="" run_status queued_job_count
+  for run_status in queued in_progress; do
+    run_ids+=$(github_api GET "repos/${repository}/actions/runs?status=${run_status}&per_page=20" |
+      /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
+    run_ids+=$'\n'
+  done
+
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    queued_job_count=$(github_api GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+      /usr/bin/python3 -c 'import json,sys; required={"self-hosted","macOS","ARM64","tart","ios"}; print(sum(job["status"] == "queued" and required.issubset(job["labels"]) for job in json.load(sys.stdin)["jobs"]))') || continue
+    if [[ "$queued_job_count" == <1-> ]]; then
+      return 0
+    fi
+  done <<<"$run_ids"
+  return 1
 }
 
 delete_vm() {
@@ -193,7 +225,7 @@ runner_registration_state() {
 }
 
 run_one_ephemeral_runner() {
-  local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed work_disk ssh_ready state missing_count cleanup_allowed registration_state lane_lock_owned
+  local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed work_disk ssh_ready state missing_count cleanup_allowed registration_state lane_lock_owned lane_priority_requested
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -203,12 +235,17 @@ run_one_ephemeral_runner() {
   runner_status=1
   cleanup_allowed=true
   lane_lock_owned=false
+  lane_priority_requested=false
 
+  request_native_lane_priority
+  lane_priority_requested=true
   while ! acquire_lane_lock; do
     log "waiting because another Tart job VM is active"
     /bin/sleep 15
   done
   lane_lock_owned=true
+  release_native_lane_priority
+  lane_priority_requested=false
 
   log "cloning ${base_vm} to ${vm_name}"
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || {
@@ -331,6 +368,8 @@ run_one_ephemeral_runner() {
     fi
   } always {
     trap - INT TERM
+    [[ "$lane_priority_requested" != true ]] || release_native_lane_priority
+    lane_priority_requested=false
     cleanup_vm || runner_status=1
     [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
   }
@@ -388,13 +427,19 @@ main() {
   done
 
   while true; do
-    if run_one_ephemeral_runner; then
-      log "ephemeral runner cycle completed"
+    if repository_has_queued_native_job; then
+      if run_one_ephemeral_runner; then
+        log "ephemeral runner cycle completed"
+      else
+        log "ephemeral runner cycle failed; retrying in 30 seconds"
+        /bin/sleep 30
+      fi
     else
-      log "ephemeral runner cycle failed; retrying in 30 seconds"
-      /bin/sleep 30
+      /bin/sleep 15
     fi
   done
 }
 
-main
+if [[ "${TRIPS_RUNNER_CONTROLLER_TEST_MODE:-false}" != true ]]; then
+  main
+fi

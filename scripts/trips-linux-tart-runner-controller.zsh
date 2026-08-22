@@ -17,6 +17,7 @@ readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
 readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
+readonly native_priority_file="${TRIPS_TART_NATIVE_PRIORITY_FILE:-/Users/jai/Library/Logs/trips-tart-runner-native-priority}"
 
 typeset -g github_installation_token=""
 typeset -g github_installation_token_expires_at=0
@@ -59,6 +60,17 @@ acquire_controller_lock() { acquire_lock "$lock_directory"; }
 release_controller_lock() { release_lock "$lock_directory"; }
 acquire_lane_lock() { acquire_lock "$lane_lock_directory"; }
 release_lane_lock() { release_lock "$lane_lock_directory"; }
+
+native_lane_priority_requested() {
+  local owner_pid=""
+  [[ -r "$native_priority_file" ]] || return 1
+  read -r owner_pid <"$native_priority_file"
+  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then
+    return 0
+  fi
+  /bin/rm -f "$native_priority_file"
+  return 1
+}
 
 base64url() {
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
@@ -447,6 +459,11 @@ main() {
       continue
     fi
     if repository=$(next_repository); then
+      if native_lane_priority_requested; then
+        log "yielding the shared Tart lane to the waiting native controller"
+        /bin/sleep 15
+        continue
+      fi
       if run_one_ephemeral_runner "$repository"; then
         log "ephemeral runner cycle completed for ${repository}"
       else
@@ -461,4 +478,6 @@ main() {
   done
 }
 
-main
+if [[ "${TRIPS_RUNNER_CONTROLLER_TEST_MODE:-false}" != true ]]; then
+  main
+fi
