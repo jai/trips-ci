@@ -7,12 +7,14 @@ readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repositories="${TRIPS_LINUX_TART_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-ci,jai/trips-fastlane,jai/openclaw-prompts}"
 readonly base_vm="${TRIPS_LINUX_TART_BASE_VM:-trips-linux-runner-base}"
+readonly max_concurrent_runners="${TRIPS_LINUX_TART_MAX_CONCURRENT_RUNNERS:-2}"
 readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_TART_RUNNER_NAME_PREFIX:-jais-mac-mini-tart-linux}"
 readonly runner_labels="jai-ci"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
+readonly reservation_directory="${log_directory}/reservations"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
@@ -62,39 +64,57 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
-repository_has_queued_job() {
-  local repository="$1" run_status run_id
-  for run_status in queued in_progress; do
-    while IFS= read -r run_id; do
-      [[ -n "$run_id" ]] || continue
-      if /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
-        /usr/bin/grep -qxv '0'; then
-        return 0
-      fi
-    done < <(
-      /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[].id'
-    )
+queued_jobs() {
+  local repository run_status run_id job_id
+  for repository in ${(s:,:)repositories}; do
+    for run_status in queued in_progress; do
+      while IFS= read -r run_id; do
+        [[ -n "$run_id" ]] || continue
+        while IFS= read -r job_id; do
+          [[ -n "$job_id" ]] || continue
+          printf '%s\t%s\n' "$repository" "$job_id"
+        done < <(
+          /opt/homebrew/bin/gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci"))) | .id'
+        )
+      done < <(
+        /opt/homebrew/bin/gh api \
+          -H 'Accept: application/vnd.github+json' \
+          -H 'X-GitHub-Api-Version: 2022-11-28' \
+          "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
+          --jq '.workflow_runs[].id'
+      )
+    done
   done
-  return 1
 }
 
-next_repository() {
-  local repository
-  for repository in ${(s:,:)repositories}; do
-    if repository_has_queued_job "$repository"; then
-      printf '%s' "$repository"
-      return 0
-    fi
-  done
-  return 1
+claim_next_job() {
+  local scan_lock claim repository job_id reservation
+  scan_lock="${reservation_directory}/.scan-lock"
+  /bin/mkdir "$scan_lock" 2>/dev/null || return 1
+  claim=""
+  {
+    while IFS=$'\t' read -r repository job_id; do
+      [[ -n "$repository" && -n "$job_id" ]] || continue
+      reservation="${reservation_directory}/${repository//\//_}-${job_id}"
+      if /bin/mkdir "$reservation" 2>/dev/null; then
+        claim="${repository}"$'\t'"${job_id}"
+        break
+      fi
+    done < <(queued_jobs)
+  } always {
+    /bin/rmdir "$scan_lock" 2>/dev/null || true
+  }
+  [[ -n "$claim" ]] || return 1
+  printf '%s' "$claim"
+}
+
+release_job_reservation() {
+  local repository="$1" job_id="$2"
+  /bin/rmdir "${reservation_directory}/${repository//\//_}-${job_id}" 2>/dev/null || true
 }
 
 delete_vm() {
@@ -133,28 +153,14 @@ delete_runner_registration() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready ios_runner_count linux_runner_count
-  suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
+  local repository="$1" job_id="$2" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready
+  suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-${job_id}-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   vm_pid=""
   runner_pid=""
   runner_status=1
-
-  while true; do
-    ios_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-runner-job-' || true
-    )
-    linux_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-linux-runner-job-' || true
-    )
-    (( ios_runner_count == 0 || linux_runner_count == 0 )) && break
-    log "waiting because an iOS VM and a Linux runner are already active"
-    /bin/sleep 15
-  done
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
@@ -234,8 +240,31 @@ run_one_ephemeral_runner() {
   return "$runner_status"
 }
 
+worker_loop() {
+  local worker_index="$1" claim repository job_id
+  while true; do
+    if claim=$(claim_next_job); then
+      IFS=$'\t' read -r repository job_id <<< "$claim"
+      log "worker ${worker_index} reserved queued job ${job_id} for ${repository}"
+      {
+        if run_one_ephemeral_runner "$repository" "$job_id"; then
+          log "worker ${worker_index} completed a job for ${repository}"
+        else
+          log "worker ${worker_index} runner cycle failed for ${repository}; retrying in 15 seconds"
+          /bin/sleep 15
+        fi
+      } always {
+        release_job_reservation "$repository" "$job_id"
+      }
+    else
+      /bin/sleep 2
+    fi
+  done
+}
+
 main() {
-  local repository
+  local stale_reservation stale_vm worker_index
+  local -a worker_pids
   umask 077
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
@@ -253,6 +282,16 @@ main() {
     log "GitHub CLI authentication is unavailable"
     return 1
   fi
+  if ! printf '%s\n' "$max_concurrent_runners" | /usr/bin/grep -Eq '^[1-9][0-9]*$'; then
+    log "TRIPS_LINUX_TART_MAX_CONCURRENT_RUNNERS must be a positive integer"
+    return 1
+  fi
+
+  /bin/mkdir -p "$reservation_directory"
+  /bin/rmdir "${reservation_directory}/.scan-lock" 2>/dev/null || true
+  for stale_reservation in "${reservation_directory}"/*(N/); do
+    /bin/rmdir "$stale_reservation" 2>/dev/null || true
+  done
 
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-linux-runner-job-* ]]; then
@@ -261,18 +300,14 @@ main() {
     fi
   done < <(/opt/homebrew/bin/tart list --source local --quiet)
 
-  while true; do
-    if repository=$(next_repository); then
-      if run_one_ephemeral_runner "$repository"; then
-        log "ephemeral runner completed a job for ${repository}"
-      else
-        log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
-        /bin/sleep 15
-      fi
-    else
-      /bin/sleep 5
-    fi
+  worker_pids=()
+  for (( worker_index = 1; worker_index <= max_concurrent_runners; worker_index++ )); do
+    worker_loop "$worker_index" &
+    worker_pids+=("$!")
   done
+  trap '/bin/kill ${worker_pids[@]} 2>/dev/null || true; wait; exit 0' INT TERM
+  log "started ${max_concurrent_runners} concurrent Linux runner workers"
+  wait
 }
 
 main
