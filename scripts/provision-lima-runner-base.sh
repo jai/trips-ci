@@ -11,7 +11,7 @@ node_root="/usr/local/lib/nodejs"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  build-essential ca-certificates curl docker.io git git-lfs jq rsync shellcheck unzip xz-utils
+  build-essential ca-certificates curl docker.io gh git git-lfs jq rsync shellcheck unzip xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
@@ -54,5 +54,6 @@ runner_home=$(getent passwd jai | cut -d: -f6)
 install -d -m 0755 "$runner_home/.cache" "$runner_home/.npm"
 chown -R jai:jai "$runner_home/.cache" "$runner_home/.npm"
 docker info --format 'Docker {{.ServerVersion}} using {{.Driver}} at {{.DockerRootDir}}'
+/usr/bin/gh --version
 /usr/local/bin/node --version
 /usr/local/bin/npm --version
