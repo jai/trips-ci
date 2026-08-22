@@ -92,8 +92,8 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     [[ $result == 3 ]]
     set -e
 
-    github_api() {
-      local method="$1" endpoint="$2"
+    github_user_api() {
+      local endpoint="$1"
       if [[ "$endpoint" == *"actions/runs?status=queued"* ]]; then
         print "{\"workflow_runs\":[]}"
       elif [[ "$endpoint" == *"actions/runs?status=in_progress"* ]]; then
@@ -104,8 +104,8 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     }
     repository_has_queued_native_job
 
-    github_api() {
-      local method="$1" endpoint="$2"
+    github_user_api() {
+      local endpoint="$1"
       if [[ "$endpoint" == *"actions/runs?status=queued"* ]]; then
         print "{\"workflow_runs\":[{\"id\":44}]}"
       elif [[ "$endpoint" == *"actions/runs?status=in_progress"* ]]; then
@@ -116,8 +116,8 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     }
     ! repository_has_queued_native_job
 
-    github_api() {
-      local method="$1" endpoint="$2"
+    github_user_api() {
+      local endpoint="$1"
       if [[ "$endpoint" == *"actions/runs?status=queued"* ]]; then
         print "{\"workflow_runs\":[{\"id\":43}]}"
       elif [[ "$endpoint" == *"actions/runs?status=in_progress"* ]]; then

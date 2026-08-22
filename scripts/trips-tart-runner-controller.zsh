@@ -142,6 +142,14 @@ github_api() {
     "https://api.github.com/${endpoint}"
 }
 
+github_user_api() {
+  local endpoint="$1"
+  /opt/homebrew/bin/gh api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$endpoint"
+}
+
 registration_token() {
   local installation_token="$1"
   /usr/bin/curl -fsS -X POST \
@@ -157,7 +165,7 @@ repository_has_queued_native_job() {
   for run_status in queued in_progress; do
     page=1
     while true; do
-      response=$(github_api GET "repos/${repository}/actions/runs?status=${run_status}&per_page=100&page=${page}") || return 1
+      response=$(github_user_api "repos/${repository}/actions/runs?status=${run_status}&per_page=100&page=${page}") || return 1
       run_ids+=$(printf '%s' "$response" |
         /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
       run_ids+=$'\n'
@@ -169,7 +177,7 @@ repository_has_queued_native_job() {
 
   while IFS= read -r run_id; do
     [[ -n "$run_id" ]] || continue
-    queued_job_count=$(github_api GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+    queued_job_count=$(github_user_api "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
       AVAILABLE_LABELS="self-hosted,macOS,ARM64,${runner_labels}" /usr/bin/python3 -c 'import json,os,sys; available=set(os.environ["AVAILABLE_LABELS"].split(",")); print(sum(job["status"] == "queued" and set(job["labels"]).issubset(available) for job in json.load(sys.stdin)["jobs"]))') || continue
     if [[ "$queued_job_count" == <1-> ]]; then
       return 0
@@ -178,9 +186,9 @@ repository_has_queued_native_job() {
   return 1
 }
 
-installation_api_has_headroom() {
+user_api_has_headroom() {
   local remaining
-  remaining=$(github_api GET rate_limit |
+  remaining=$(github_user_api rate_limit |
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["remaining"])') || return 1
   [[ "$remaining" == <1500-> ]]
 }
@@ -469,6 +477,10 @@ main() {
     log "base VM ${base_vm} is missing"
     return 1
   fi
+  if ! /opt/homebrew/bin/gh auth token >/dev/null 2>&1; then
+    log "GitHub CLI authentication is unavailable for private-repository queue discovery"
+    return 1
+  fi
 
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-runner-job-* ]]; then
@@ -503,8 +515,8 @@ main() {
     if ! ensure_installation_token; then
       log "GitHub App authentication is unavailable; retrying in 30 seconds"
       /bin/sleep 30
-    elif ! installation_api_has_headroom; then
-      log "GitHub App API has less than 1,500 core requests remaining; pausing discovery for 180 seconds"
+    elif ! user_api_has_headroom; then
+      log "GitHub user API has less than 1,500 core requests remaining; pausing discovery for 180 seconds"
       /bin/sleep 180
     elif repository_has_queued_native_job; then
       run_one_ephemeral_runner
