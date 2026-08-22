@@ -64,26 +64,24 @@ registration_token() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_status run_id
-  for run_status in queued in_progress; do
-    while IFS= read -r run_id; do
-      [[ -n "$run_id" ]] || continue
-      if /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
-        /usr/bin/grep -qxv '0'; then
-        return 0
-      fi
-    done < <(
-      /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[].id'
-    )
-  done
+  local repository="$1" run_id
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    if /opt/homebrew/bin/gh api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+      --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
+      /usr/bin/grep -qxv '0'; then
+      return 0
+    fi
+  done < <(
+    /opt/homebrew/bin/gh api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs?per_page=30" \
+      --jq '.workflow_runs[] | select(.status == "queued" or .status == "in_progress") | .id'
+  )
   return 1
 }
 
@@ -264,7 +262,7 @@ main() {
     log "failed to set ${base_vm} memory to ${base_memory_mb} MB"
     return 1
   fi
-  if ! /opt/homebrew/bin/gh auth status >/dev/null 2>&1; then
+  if ! /opt/homebrew/bin/gh auth token >/dev/null 2>&1; then
     log "GitHub CLI authentication is unavailable"
     return 1
   fi
@@ -285,7 +283,9 @@ main() {
         /bin/sleep 15
       fi
     else
-      /bin/sleep 5
+      # Eight repositories are inspected per pass. A 30-second cadence keeps
+      # idle discovery prompt without exhausting the user API allowance.
+      /bin/sleep 30
     fi
   done
 }
