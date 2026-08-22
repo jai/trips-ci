@@ -116,13 +116,13 @@ registration_token() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_id run_ids queued_job_count status
+  local repository="$1" run_id run_ids queued_job_count run_status
   run_ids=""
-  for status in queued in_progress; do
+  for run_status in queued in_progress; do
     run_ids+=$(/opt/homebrew/bin/gh api \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "repos/${repository}/actions/runs?status=${status}&per_page=20" \
+      "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
       --jq '.workflow_runs[].id') || return 1
     run_ids+=$'\n'
   done
