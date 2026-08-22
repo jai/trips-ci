@@ -85,7 +85,7 @@ run_one_ephemeral_runner() {
   while true; do
     linux_runner_count=$(
       /opt/homebrew/bin/limactl list --json 2>/dev/null |
-        /usr/bin/jq -r '.name' |
+        /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]' |
         /usr/bin/grep -c '^trips-linux-runner-[ab]-job-' || true
     )
     (( linux_runner_count <= 2 )) && break

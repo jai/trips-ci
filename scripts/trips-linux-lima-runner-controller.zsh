@@ -112,10 +112,11 @@ delete_runner_registration() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_status run_id
+  local repository="$1" run_status run_id head_repository
   for run_status in queued in_progress; do
-    while IFS= read -r run_id; do
+    while IFS=$'\t' read -r run_id head_repository; do
       [[ -n "$run_id" ]] || continue
+      [[ "$head_repository" == "$repository" ]] || continue
       if /opt/homebrew/bin/gh api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -129,7 +130,7 @@ repository_has_queued_job() {
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
         "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[].id'
+        --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
     )
   done
   return 1
@@ -267,7 +268,10 @@ main() {
     [[ "$stale_vm" == trips-linux-runner-${slot}-job-* ]] || continue
     log "removing stale ephemeral VM ${stale_vm}"
     delete_vm "$stale_vm"
-  done < <(/opt/homebrew/bin/limactl list --json 2>/dev/null | /usr/bin/jq -r '.name')
+  done < <(
+    /opt/homebrew/bin/limactl list --json 2>/dev/null |
+      /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]'
+  )
 
   while true; do
     acquire_selection_lock

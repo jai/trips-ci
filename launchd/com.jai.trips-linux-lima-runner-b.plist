@@ -22,8 +22,8 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>
-  <string>/Users/jai/Library/Logs/trips-linux-lima-runner/slot-b-launcher.log</string>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner-b.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/jai/Library/Logs/trips-linux-lima-runner/slot-b-launcher.err</string>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner-b.err</string>
 </dict>
 </plist>
