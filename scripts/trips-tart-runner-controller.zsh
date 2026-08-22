@@ -70,14 +70,27 @@ delete_vm() {
   /opt/homebrew/bin/tart delete "$vm_name" >/dev/null 2>&1 || true
 }
 
+runner_worker_started() {
+  local vm_ip="$1"
+  /usr/bin/ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=3 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -i "$ssh_key" \
+    "admin@${vm_ip}" \
+    "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null" 2>/dev/null
+}
+
 run_one_ephemeral_runner() {
-  local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status work_disk ssh_ready linux_runner_count
+  local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed work_disk ssh_ready linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   work_disk="${work_disk_directory}/${vm_name}.raw"
   vm_pid=""
+  runner_pid=""
   runner_status=1
 
   while true; do
@@ -146,8 +159,35 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; ./run.sh"
-    runner_status=$?
+      "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
+    runner_pid=$!
+    runner_claimed=false
+
+    for _ in {1..60}; do
+      if ! /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
+        wait "$runner_pid"
+        runner_status=$?
+        break
+      fi
+
+      # GitHub's runner metadata can report a stale busy state. Only the
+      # workload process proves that this ephemeral runner accepted a job.
+      if runner_worker_started "$vm_ip"; then
+        runner_claimed=true
+        wait "$runner_pid"
+        runner_status=$?
+        break
+      fi
+      /bin/sleep 5
+    done
+
+    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" >/dev/null 2>&1 || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      runner_pid=""
+      runner_status=0
+    fi
   } always {
     trap - INT TERM
     cleanup_vm
