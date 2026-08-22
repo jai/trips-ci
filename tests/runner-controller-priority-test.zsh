@@ -11,6 +11,8 @@ TRIPS_TART_LANE_POLL_SECONDS=0 \
   /bin/zsh -c '
     set -euo pipefail
     source "$1/scripts/trips-linux-tart-runner-controller.zsh"
+    acquire_priority_lock() { return 0; }
+    release_priority_lock() { return 0; }
     printf "%s\n" $$ >"$TRIPS_TART_NATIVE_PRIORITY_FILE"
     native_lane_priority_requested
     printf "%s\n" 999999 >"$TRIPS_TART_NATIVE_PRIORITY_FILE"
@@ -26,10 +28,17 @@ TRIPS_TART_LANE_POLL_SECONDS=0 \
       printf "%s\n" $$ >"$TRIPS_TART_NATIVE_PRIORITY_FILE"
       return 0
     }
+    shared_lane_has_ephemeral_vm() { return 1; }
     typeset -g lane_released=false
     release_lane_lock() { lane_released=true; }
     acquire_linux_lane && exit 1
     [[ $? == 2 ]]
+    [[ "$lane_released" == true ]]
+
+    acquire_lane_lock() { return 0; }
+    shared_lane_has_ephemeral_vm() { return 0; }
+    lane_released=false
+    ! acquire_clean_lane_lock
     [[ "$lane_released" == true ]]
   ' _ "$repository_root"
 
@@ -38,6 +47,8 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
   /bin/zsh -c '
     set -euo pipefail
     source "$1/scripts/trips-tart-runner-controller.zsh"
+    acquire_priority_lock() { return 0; }
+    release_priority_lock() { return 0; }
     request_native_lane_priority
     [[ "$(<"$TRIPS_TART_NATIVE_PRIORITY_FILE")" == $$ ]]
     release_native_lane_priority
@@ -66,6 +77,14 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
       fi
     }
     ! repository_has_queued_native_job
+
+    typeset -g github_installation_token="expired"
+    ensure_installation_token() { github_installation_token="fresh"; }
+    registration_token() { [[ "$1" == fresh ]] && print runner-token; }
+    ensure_installation_token
+    token=$(registration_token "$github_installation_token")
+    [[ "$github_installation_token" == fresh ]]
+    [[ "$token" == runner-token ]]
   ' _ "$repository_root"
 
 print "runner controller native-priority tests passed"

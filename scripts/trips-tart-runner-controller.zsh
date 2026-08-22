@@ -19,13 +19,16 @@ readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
 readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
 readonly native_priority_file="${TRIPS_TART_NATIVE_PRIORITY_FILE:-/Users/jai/Library/Logs/trips-tart-runner-native-priority}"
+readonly native_priority_lock="${native_priority_file}.lock"
 
 typeset -g github_installation_token=""
 typeset -g github_installation_token_expires_at=0
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-mkdir -p "$log_directory"
+if [[ "${TRIPS_RUNNER_CONTROLLER_TEST_MODE:-false}" != true ]]; then
+  mkdir -p "$log_directory"
+fi
 
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -49,17 +52,36 @@ acquire_controller_lock() { acquire_lock "$lock_directory"; }
 release_controller_lock() { release_lock "$lock_directory"; }
 acquire_lane_lock() { acquire_lock "$lane_lock_directory"; }
 release_lane_lock() { release_lock "$lane_lock_directory"; }
+acquire_priority_lock() { acquire_lock "$native_priority_lock"; }
+release_priority_lock() { release_lock "$native_priority_lock"; }
+
+shared_lane_has_ephemeral_vm() {
+  /opt/homebrew/bin/tart list --source local --quiet |
+    /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
+}
+
+acquire_clean_lane_lock() {
+  acquire_lane_lock || return 1
+  if shared_lane_has_ephemeral_vm; then
+    release_lane_lock
+    return 1
+  fi
+}
 
 request_native_lane_priority() {
   local candidate="${native_priority_file}.$$"
+  while ! acquire_priority_lock; do /bin/sleep 1; done
   printf '%s\n' $$ >"$candidate"
   /bin/mv -f "$candidate" "$native_priority_file"
+  release_priority_lock
 }
 
 release_native_lane_priority() {
   local owner_pid=""
+  while ! acquire_priority_lock; do /bin/sleep 1; done
   [[ -r "$native_priority_file" ]] && read -r owner_pid <"$native_priority_file"
   [[ "$owner_pid" != $$ ]] || /bin/rm -f "$native_priority_file"
+  release_priority_lock
 }
 
 base64url() {
@@ -103,9 +125,9 @@ github_api() {
 }
 
 registration_token() {
-  ensure_installation_token || return 1
+  local installation_token="$1"
   /usr/bin/curl -fsS -X POST \
-    -H "Authorization: Bearer $github_installation_token" \
+    -H "Authorization: Bearer $installation_token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
@@ -227,7 +249,7 @@ run_one_ephemeral_runner() {
 
   request_native_lane_priority
   lane_priority_requested=true
-  while ! acquire_lane_lock; do
+  while ! acquire_clean_lane_lock; do
     log "waiting because another Tart job VM is active"
     /bin/sleep 15
   done
@@ -290,7 +312,8 @@ run_one_ephemeral_runner() {
       "admin@${vm_ip}" \
       'set -e; root_store=$(diskutil info / | awk -F: '\''/APFS Physical Store/{gsub(/ /, "", $2); print $2; exit}'\''); root_device=$(printf "%s" "$root_store" | sed -E "s/s[0-9]+$//"); work_device=$(diskutil list physical | awk '\''/^\/dev\/disk[0-9]+ /{gsub("/dev/", "", $1); print $1}'\'' | grep -v "^${root_device}$"); test "$(printf "%s\n" "$work_device" | wc -l | tr -d " ")" = 1; printf "%s\n" "$root_device" "$work_device" | while IFS= read -r device; do printf "%s\n" "$device" | grep -Eq "^disk[0-9]+$" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT "/dev/$work_device" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q "iOS"; then runtime_ready=true; break; fi; sleep 2; done; [ "$runtime_ready" = true ]; launchctl kill SIGKILL "gui/$(id -u)/com.apple.CoreSimulator.CoreSimulatorService" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/Library/Caches /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag' || return 1
 
-    token=$(registration_token) || return 1
+    ensure_installation_token || return 1
+    token=$(registration_token "$github_installation_token") || return 1
     log "registering ${runner_name}"
     printf '%s\n' "$token" | /usr/bin/ssh \
       -o BatchMode=yes \
@@ -359,7 +382,9 @@ run_one_ephemeral_runner() {
     [[ "$lane_priority_requested" != true ]] || release_native_lane_priority
     lane_priority_requested=false
     cleanup_vm || runner_status=1
-    [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
+    if [[ "$cleanup_allowed" == true && -n "$vm_pid" ]]; then
+      wait "$vm_pid" >/dev/null 2>&1 || true
+    fi
   }
   return "$runner_status"
 }

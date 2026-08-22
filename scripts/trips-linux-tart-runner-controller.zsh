@@ -18,6 +18,7 @@ readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
 readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
 readonly native_priority_file="${TRIPS_TART_NATIVE_PRIORITY_FILE:-/Users/jai/Library/Logs/trips-tart-runner-native-priority}"
+readonly native_priority_lock="${native_priority_file}.lock"
 readonly lane_poll_seconds="${TRIPS_TART_LANE_POLL_SECONDS:-15}"
 
 typeset -g github_installation_token=""
@@ -25,7 +26,9 @@ typeset -g github_installation_token_expires_at=0
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-mkdir -p "$log_directory"
+if [[ "${TRIPS_RUNNER_CONTROLLER_TEST_MODE:-false}" != true ]]; then
+  mkdir -p "$log_directory"
+fi
 
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -49,22 +52,43 @@ acquire_controller_lock() { acquire_lock "$lock_directory"; }
 release_controller_lock() { release_lock "$lock_directory"; }
 acquire_lane_lock() { acquire_lock "$lane_lock_directory"; }
 release_lane_lock() { release_lock "$lane_lock_directory"; }
+acquire_priority_lock() { acquire_lock "$native_priority_lock"; }
+release_priority_lock() { release_lock "$native_priority_lock"; }
+
+shared_lane_has_ephemeral_vm() {
+  /opt/homebrew/bin/tart list --source local --quiet |
+    /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
+}
+
+acquire_clean_lane_lock() {
+  acquire_lane_lock || return 1
+  if shared_lane_has_ephemeral_vm; then
+    release_lane_lock
+    return 1
+  fi
+}
 
 native_lane_priority_requested() {
-  local owner_pid=""
-  [[ -r "$native_priority_file" ]] || return 1
+  local owner_pid="" requested=false
+  acquire_priority_lock || return 0
+  if [[ ! -r "$native_priority_file" ]]; then
+    release_priority_lock
+    return 1
+  fi
   read -r owner_pid <"$native_priority_file"
   if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then
-    return 0
+    requested=true
+  else
+    /bin/rm -f "$native_priority_file"
   fi
-  /bin/rm -f "$native_priority_file"
-  return 1
+  release_priority_lock
+  [[ "$requested" == true ]]
 }
 
 acquire_linux_lane() {
   while true; do
     native_lane_priority_requested && return 2
-    if acquire_lane_lock; then
+    if acquire_clean_lane_lock; then
       if native_lane_priority_requested; then
         release_lane_lock
         return 2
@@ -121,10 +145,9 @@ github_api() {
 }
 
 registration_token() {
-  local repository="$1"
-  ensure_installation_token || return 1
+  local repository="$1" installation_token="$2"
   /usr/bin/curl -fsS -X POST \
-    -H "Authorization: Bearer $github_installation_token" \
+    -H "Authorization: Bearer $installation_token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
@@ -317,7 +340,8 @@ run_one_ephemeral_runner() {
     [[ "$ssh_ready" == true ]] || return 1
     log "${vm_name} booted"
 
-    token=$(registration_token "$repository") || return 1
+    ensure_installation_token || return 1
+    token=$(registration_token "$repository" "$github_installation_token") || return 1
     log "registering ${runner_name} for ${repository}"
     printf '%s\n' "$token" | /usr/bin/ssh \
       -o BatchMode=yes \
@@ -390,7 +414,9 @@ run_one_ephemeral_runner() {
   } always {
     trap - INT TERM
     cleanup_vm || runner_status=1
-    [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
+    if [[ "$cleanup_allowed" == true && -n "$vm_pid" ]]; then
+      wait "$vm_pid" >/dev/null 2>&1 || true
+    fi
   }
   return "$runner_status"
 }
