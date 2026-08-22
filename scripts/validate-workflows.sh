@@ -34,10 +34,24 @@ zsh -n \
   "$repo_root/scripts/start-trips-tart-runner.zsh" \
   "$repo_root/scripts/trips-linux-lima-runner-controller.zsh" \
   "$repo_root/scripts/trips-tart-runner-controller.zsh"
-plutil -lint \
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist" \
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist" \
+plist_files=(
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist"
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"
   "$repo_root/launchd/com.jai.trips-tart-runner.plist"
+)
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "${plist_files[@]}"
+else
+  python3 - "${plist_files[@]}" <<'PY'
+import plistlib
+import sys
+
+for path in sys.argv[1:]:
+    with open(path, "rb") as handle:
+        plistlib.load(handle)
+    print(f"{path}: OK")
+PY
+fi
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \
   "$repo_root/.github/workflows" \
