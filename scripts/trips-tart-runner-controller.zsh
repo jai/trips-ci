@@ -84,6 +84,37 @@ runner_worker_started() {
     "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null" 2>/dev/null
 }
 
+runner_listener_started() {
+  local vm_ip="$1"
+  /usr/bin/ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=3 \
+    -o ServerAliveInterval=2 \
+    -o ServerAliveCountMax=2 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -i "$ssh_key" \
+    "admin@${vm_ip}" \
+    "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Listener run' >/dev/null" 2>/dev/null
+}
+
+wait_for_runner_shutdown() {
+  local vm_ip="$1" missing_count=0 deadline
+  deadline=$(( $(/bin/date +%s) + 3300 ))
+  while (( missing_count < 3 && $(/bin/date +%s) < deadline )); do
+    if runner_worker_started "$vm_ip" || runner_listener_started "$vm_ip"; then
+      missing_count=0
+    else
+      (( missing_count += 1 ))
+    fi
+    (( missing_count >= 3 )) || /bin/sleep 5
+  done
+  if (( missing_count < 3 )); then
+    log "runner processes exceeded the 55-minute execution budget"
+    return 1
+  fi
+}
+
 run_one_ephemeral_runner() {
   local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed work_disk ssh_ready linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
@@ -166,34 +197,46 @@ run_one_ephemeral_runner() {
     runner_claimed=false
 
     for _ in {1..60}; do
-      if ! /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
-        wait "$runner_pid"
-        runner_status=$?
-        break
-      fi
-
-      # GitHub's runner metadata can report a stale busy state. Only the
-      # workload process proves that this ephemeral runner accepted a job.
       if runner_worker_started "$vm_ip"; then
         runner_claimed=true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+        runner_pid=""
+        if wait_for_runner_shutdown "$vm_ip"; then
+          runner_status=0
+        else
+          runner_status=1
+        fi
+        break
+      fi
+      if [[ -n "$runner_pid" ]] && ! /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
         wait "$runner_pid"
         runner_status=$?
-        break
+        runner_pid=""
+        if ! runner_listener_started "$vm_ip"; then
+          break
+        fi
       fi
       /bin/sleep 5
     done
 
     # Recheck after the final sleep so a job accepted at the idle deadline is
     # not killed without observing its worker.
-    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" >/dev/null 2>&1 && runner_worker_started "$vm_ip"; then
+    if [[ "$runner_claimed" == false ]] && runner_worker_started "$vm_ip"; then
       runner_claimed=true
-      wait "$runner_pid"
-      runner_status=$?
+      [[ -z "$runner_pid" ]] || wait "$runner_pid" >/dev/null 2>&1 || true
+      runner_pid=""
+      if wait_for_runner_shutdown "$vm_ip"; then
+        runner_status=0
+      else
+        runner_status=1
+      fi
     fi
-    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
+    if [[ "$runner_claimed" == false ]]; then
       log "${runner_name} remained idle; removing it"
-      /bin/kill "$runner_pid" >/dev/null 2>&1 || true
-      wait "$runner_pid" >/dev/null 2>&1 || true
+      if [[ -n "$runner_pid" ]]; then
+        /bin/kill "$runner_pid" >/dev/null 2>&1 || true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+      fi
       runner_pid=""
       runner_status=0
     fi
