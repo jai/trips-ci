@@ -199,13 +199,14 @@ run_one_ephemeral_runner() {
     for _ in {1..60}; do
       if runner_worker_started "$vm_ip"; then
         runner_claimed=true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-        runner_pid=""
         if wait_for_runner_shutdown "$vm_ip"; then
           runner_status=0
         else
           runner_status=1
         fi
+        /bin/kill "$runner_pid" >/dev/null 2>&1 || true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+        runner_pid=""
         break
       fi
       if [[ -n "$runner_pid" ]] && ! /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
@@ -223,13 +224,16 @@ run_one_ephemeral_runner() {
     # not killed without observing its worker.
     if [[ "$runner_claimed" == false ]] && runner_worker_started "$vm_ip"; then
       runner_claimed=true
-      [[ -z "$runner_pid" ]] || wait "$runner_pid" >/dev/null 2>&1 || true
-      runner_pid=""
       if wait_for_runner_shutdown "$vm_ip"; then
         runner_status=0
       else
         runner_status=1
       fi
+      if [[ -n "$runner_pid" ]]; then
+        /bin/kill "$runner_pid" >/dev/null 2>&1 || true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+      fi
+      runner_pid=""
     fi
     if [[ "$runner_claimed" == false ]]; then
       log "${runner_name} remained idle; removing it"
