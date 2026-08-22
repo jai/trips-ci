@@ -66,6 +66,40 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
+installation_token() {
+  local jwt
+  jwt=$(github_jwt) || return 1
+  /usr/bin/curl -fsS -X POST \
+    -H "Authorization: Bearer $jwt" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/app/installations/${installation_id}/access_tokens" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+}
+
+runner_id() {
+  local runner_name="$1" token
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
+    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; print(next((str(r["id"]) for r in json.load(sys.stdin)["runners"] if r["name"] == name), ""))' "$runner_name"
+}
+
+delete_runner_registration() {
+  local runner_name="$1" id token
+  id=$(runner_id "$runner_name") || return 0
+  [[ -n "$id" ]] || return 0
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS -X DELETE \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
+}
+
 delete_vm() {
   local vm_name="$1"
   /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
@@ -97,6 +131,7 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
+    delete_runner_registration "$runner_name" || true
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
     /bin/rm -f "$work_disk"
