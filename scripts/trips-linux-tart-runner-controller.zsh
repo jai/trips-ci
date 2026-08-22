@@ -7,6 +7,7 @@ readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repositories="${TRIPS_LINUX_TART_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-ci,jai/trips-fastlane,jai/openclaw-prompts}"
 readonly base_vm="${TRIPS_LINUX_TART_BASE_VM:-trips-linux-runner-base}"
+readonly base_memory_mb="${TRIPS_LINUX_TART_BASE_MEMORY_MB:-4096}"
 readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_TART_RUNNER_NAME_PREFIX:-jais-mac-mini-tart-linux}"
 readonly runner_labels="jai-ci"
@@ -247,6 +248,14 @@ main() {
   fi
   if ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "$base_vm"; then
     log "base VM ${base_vm} is missing"
+    return 1
+  fi
+  if ! printf '%s\n' "$base_memory_mb" | /usr/bin/grep -Eq '^[1-9][0-9]*$'; then
+    log "TRIPS_LINUX_TART_BASE_MEMORY_MB must be a positive integer"
+    return 1
+  fi
+  if ! /opt/homebrew/bin/tart set "$base_vm" --memory "$base_memory_mb"; then
+    log "failed to set ${base_vm} memory to ${base_memory_mb} MB"
     return 1
   fi
   if ! /opt/homebrew/bin/gh auth status >/dev/null 2>&1; then
