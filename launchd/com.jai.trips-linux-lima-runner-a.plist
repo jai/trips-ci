@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>io.lima-vm.daemon.github-ci</string>
+  <string>com.jai.trips-linux-lima-runner-a</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jai/.local/bin/start-lima-github-ci.zsh</string>
+    <string>/Users/jai/.local/bin/start-trips-linux-lima-runner.zsh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>LIMA_HOME</key>
-    <string>/Volumes/mac-mini-external/lima</string>
+    <key>TRIPS_LINUX_LIMA_SLOT</key>
+    <string>a</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
@@ -21,13 +21,9 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>30</integer>
-  <key>UserName</key>
-  <string>jai</string>
-  <key>WorkingDirectory</key>
-  <string>/Users/jai</string>
   <key>StandardOutPath</key>
-  <string>/Users/jai/Library/Logs/lima-github-ci/launcher.log</string>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner/slot-a-launcher.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/jai/Library/Logs/lima-github-ci/launcher.err</string>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner/slot-a-launcher.err</string>
 </dict>
 </plist>

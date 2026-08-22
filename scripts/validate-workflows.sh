@@ -27,13 +27,17 @@ actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
-shellcheck \
-  "$repo_root/scripts/provision-lima-github-ci.sh" \
-  "$repo_root/scripts/reconcile-lima-runner.sh"
+shellcheck "$repo_root/scripts/provision-lima-runner-base.sh"
 zsh -n \
-  "$repo_root/scripts/start-lima-github-ci.zsh" \
-  "$repo_root/scripts/reconcile-lima-github-runners.zsh"
-plutil -lint "$repo_root/launchd/io.lima-vm.daemon.github-ci.plist"
+  "$repo_root/scripts/provision-lima-runner-base.zsh" \
+  "$repo_root/scripts/start-trips-linux-lima-runner.zsh" \
+  "$repo_root/scripts/start-trips-tart-runner.zsh" \
+  "$repo_root/scripts/trips-linux-lima-runner-controller.zsh" \
+  "$repo_root/scripts/trips-tart-runner-controller.zsh"
+plutil -lint \
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist" \
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist" \
+  "$repo_root/launchd/com.jai.trips-tart-runner.plist"
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \
   "$repo_root/.github/workflows" \

@@ -7,6 +7,8 @@ readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repository="${TRIPS_TART_REPOSITORY:-jai/trips-frontend}"
 readonly base_vm="${TRIPS_TART_BASE_VM:-trips-runner-base}"
+readonly base_cpus="${TRIPS_TART_BASE_CPUS:-4}"
+readonly base_memory_mb="${TRIPS_TART_BASE_MEMORY_MB:-16384}"
 readonly runner_root="/Users/admin/actions-runner"
 readonly runner_host_label="${TRIPS_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
 readonly runner_name_prefix="${TRIPS_TART_RUNNER_NAME_PREFIX:-${runner_host_label}}"
@@ -82,11 +84,12 @@ run_one_ephemeral_runner() {
 
   while true; do
     linux_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-linux-runner-job-' || true
+      /opt/homebrew/bin/limactl list --json 2>/dev/null |
+        /usr/bin/jq -r '.name' |
+        /usr/bin/grep -c '^trips-linux-runner-[ab]-job-' || true
     )
-    (( linux_runner_count <= 1 )) && break
-    log "waiting for Linux runner count to drop below two"
+    (( linux_runner_count <= 2 )) && break
+    log "waiting for Linux runner count to return to the two-slot contract"
     /bin/sleep 15
   done
 
@@ -169,6 +172,14 @@ main() {
   fi
   if ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
     log "base VM ${base_vm} is missing"
+    return 1
+  fi
+  if [[ "$base_cpus" != 4 || "$base_memory_mb" != 16384 ]]; then
+    log "resource contract requires 4 CPUs and 16384 MB for iOS"
+    return 1
+  fi
+  if ! /opt/homebrew/bin/tart set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
+    log "failed to apply the iOS base resource contract"
     return 1
   fi
 
