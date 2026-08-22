@@ -109,25 +109,37 @@ registration_token() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_id run_ids queued_job_count status response
+  local repository="$1" run_id run_ids queued_job_count status
   run_ids=""
   for status in queued in_progress; do
-    response=$(github_api GET "repos/${repository}/actions/runs?status=${status}&per_page=100") || return 1
-    run_ids+=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
+    run_ids+=$(/opt/homebrew/bin/gh api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs?status=${status}&per_page=20" \
+      --jq '.workflow_runs[].id') || return 1
     run_ids+=$'\n'
   done
 
   while IFS= read -r run_id; do
     [[ -n "$run_id" ]] || continue
     queued_job_count=$(
-      github_api GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
-        /usr/bin/python3 -c 'import json,sys; print(sum(1 for job in json.load(sys.stdin)["jobs"] if job["status"] == "queued" and all(label in job["labels"] for label in ("self-hosted", "linux", "arm64", "jai-ci"))))'
+      /opt/homebrew/bin/gh api \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length'
     ) || continue
     if [[ "$queued_job_count" == <1-> ]]; then
       return 0
     fi
   done <<<"$run_ids"
   return 1
+}
+
+user_api_has_headroom() {
+  local remaining
+  remaining=$(/opt/homebrew/bin/gh api rate_limit --jq '.resources.core.remaining') || return 1
+  [[ "$remaining" == <1000-> ]]
 }
 
 next_repository() {
@@ -369,6 +381,10 @@ main() {
     log "GitHub App authentication is unavailable"
     return 1
   fi
+  if ! /opt/homebrew/bin/gh auth token >/dev/null 2>&1; then
+    log "GitHub CLI authentication is unavailable for private-repository queue discovery"
+    return 1
+  fi
 
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-linux-runner-job-* ]]; then
@@ -387,8 +403,8 @@ main() {
   [[ "$preserved_stale" == false ]] || return 1
 
   while true; do
-    if ! ensure_installation_token; then
-      log "GitHub App token refresh failed; retrying in 180 seconds"
+    if ! user_api_has_headroom; then
+      log "GitHub user API has less than 1,000 core requests remaining; pausing discovery for 180 seconds"
       /bin/sleep 180
       continue
     fi
@@ -400,9 +416,8 @@ main() {
         /bin/sleep 15
       fi
     else
-      # At most 168 REST reads are made per full pass (eight repositories,
-      # one run list and up to twenty active-run job lists each). A three-minute
-      # idle cadence leaves API headroom while keeping discovery below five minutes.
+      # Server-side status filters avoid losing active runs behind completed runs.
+      # Discovery stops with 1,000 requests in reserve and idles between passes.
       /bin/sleep 180
     fi
   done
