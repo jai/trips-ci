@@ -29,6 +29,6 @@ fi
 /opt/homebrew/bin/limactl shell "$base_vm" -- \
   sudo bash -s < "$guest_provisioner"
 /opt/homebrew/bin/limactl shell "$base_vm" -- \
-  bash -lc 'set -e; test "$(uname -m)" = aarch64; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; sudo docker info >/dev/null; node --version; npm --version; test -x /opt/actions-runner/bin/Runner.Listener'
+  bash -lc 'set -e; test "$(uname -m)" = aarch64; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; sudo docker info >/dev/null; docker compose version; node --version; npm --version; test -x /opt/actions-runner/bin/Runner.Listener'
 /opt/homebrew/bin/limactl stop "$base_vm"
 print -- "Prepared stopped Lima base ${base_vm}."
