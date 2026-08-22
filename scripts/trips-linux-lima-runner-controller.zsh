@@ -195,7 +195,7 @@ run_one_ephemeral_runner() {
 
   {
     /opt/homebrew/bin/limactl shell "$vm_name" -- \
-      bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
+      bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
     token=$(registration_token "$repository") || return 1
     log "registering ${runner_name} for ${repository}"
@@ -283,8 +283,10 @@ main() {
         /bin/sleep 15
       fi
     else
+      # Keep the shared lock while idle so the second slot cannot duplicate the
+      # repository scan and exhaust the authenticated GitHub API quota.
+      /bin/sleep 30
       release_selection_lock
-      /bin/sleep 5
     fi
   done
 }
