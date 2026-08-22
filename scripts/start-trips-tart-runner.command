@@ -12,7 +12,7 @@ if ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
   exit 0
 fi
 
-if /usr/bin/pgrep -f '/Users/jai/.local/bin/trips-tart-runner-controller' >/dev/null; then
+if /usr/bin/pgrep -f '^/bin/zsh /Users/jai/.local/bin/trips-tart-runner-controller$' >/dev/null; then
   exit 0
 fi
 
