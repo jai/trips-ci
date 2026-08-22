@@ -33,47 +33,32 @@ log() {
   print -r -- "$(timestamp) $*"
 }
 
-acquire_controller_lock() {
-  local owner_pid=""
-  if /bin/mkdir "$lock_directory" 2>/dev/null; then
-    printf '%s\n' $$ >"${lock_directory}/owner.pid"
+acquire_lock() {
+  local lock_path="$1" owner_pid="" candidate
+  candidate="${lock_path}.$$"
+  printf '%s\n' $$ >"$candidate"
+  if /bin/ln "$candidate" "$lock_path" 2>/dev/null; then
+    /bin/rm -f "$candidate"
     return 0
   fi
-  [[ -r "${lock_directory}/owner.pid" ]] || return 1
-  read -r owner_pid <"${lock_directory}/owner.pid"
-  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then
-    return 1
-  fi
-  /bin/rm -f "${lock_directory}/owner.pid"
-  /bin/rmdir "$lock_directory" 2>/dev/null || return 1
-  /bin/mkdir "$lock_directory" 2>/dev/null || return 1
-  printf '%s\n' $$ >"${lock_directory}/owner.pid"
-}
-
-release_controller_lock() {
-  /bin/rm -f "${lock_directory}/owner.pid"
-  /bin/rmdir "$lock_directory" >/dev/null 2>&1 || true
-}
-
-acquire_lane_lock() {
-  local owner_pid=""
-  if /bin/mkdir "$lane_lock_directory" 2>/dev/null; then
-    printf '%s\n' $$ >"${lane_lock_directory}/owner.pid"
-    return 0
-  fi
-  [[ -r "${lane_lock_directory}/owner.pid" ]] || return 1
-  read -r owner_pid <"${lane_lock_directory}/owner.pid"
+  /bin/rm -f "$candidate"
+  [[ -r "$lock_path" ]] || return 1
+  read -r owner_pid <"$lock_path"
   if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then return 1; fi
-  /bin/rm -f "${lane_lock_directory}/owner.pid"
-  /bin/rmdir "$lane_lock_directory" 2>/dev/null || return 1
-  /bin/mkdir "$lane_lock_directory" 2>/dev/null || return 1
-  printf '%s\n' $$ >"${lane_lock_directory}/owner.pid"
+  /bin/rm -f "$lock_path"
+  acquire_lock "$lock_path"
 }
 
-release_lane_lock() {
-  /bin/rm -f "${lane_lock_directory}/owner.pid"
-  /bin/rmdir "$lane_lock_directory" >/dev/null 2>&1 || true
+release_lock() {
+  local lock_path="$1" owner_pid=""
+  [[ -r "$lock_path" ]] && read -r owner_pid <"$lock_path"
+  [[ "$owner_pid" != $$ ]] || /bin/rm -f "$lock_path"
 }
+
+acquire_controller_lock() { acquire_lock "$lock_directory"; }
+release_controller_lock() { release_lock "$lock_directory"; }
+acquire_lane_lock() { acquire_lock "$lane_lock_directory"; }
+release_lane_lock() { release_lock "$lane_lock_directory"; }
 
 base64url() {
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
@@ -161,7 +146,7 @@ repository_has_queued_job() {
 user_api_has_headroom() {
   local remaining
   remaining=$(/opt/homebrew/bin/gh api rate_limit --jq '.resources.core.remaining') || return 1
-  [[ "$remaining" == <1000-> ]]
+  [[ "$remaining" == <1500-> ]]
 }
 
 next_repository() {
@@ -176,10 +161,11 @@ next_repository() {
 }
 
 delete_vm() {
-  local vm_name="$1"
+  local vm_name="$1" vm_list
   /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
   /opt/homebrew/bin/tart delete "$vm_name" >/dev/null 2>&1 || true
-  ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "$vm_name" || {
+  vm_list=$(/opt/homebrew/bin/tart list --source local --quiet) || return 1
+  ! printf '%s\n' "$vm_list" | /usr/bin/grep -qx "$vm_name" || {
     log "failed to delete ${vm_name}"
     return 1
   }
@@ -449,14 +435,14 @@ main() {
         fi
       fi
       log "removing safely stopped stale ephemeral VM ${stale_vm}"
-      delete_vm "$stale_vm"
+      delete_vm "$stale_vm" || return 1
     fi
   done < <(/opt/homebrew/bin/tart list --source local --quiet)
   [[ "$preserved_stale" == false ]] || return 1
 
   while true; do
     if ! user_api_has_headroom; then
-      log "GitHub user API has less than 1,000 core requests remaining; pausing discovery for 180 seconds"
+      log "GitHub user API has less than 1,500 core requests remaining; pausing discovery for 180 seconds"
       /bin/sleep 180
       continue
     fi
@@ -469,7 +455,7 @@ main() {
       fi
     else
       # Server-side status filters avoid losing active runs behind completed runs.
-      # Discovery stops with 1,000 requests in reserve and idles between passes.
+      # A pass costs at most 336 requests, preserving at least 1,164 in reserve.
       /bin/sleep 180
     fi
   done
