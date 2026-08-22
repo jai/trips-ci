@@ -15,6 +15,10 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
+readonly lock_directory="${log_directory}/controller.lock"
+
+typeset -g github_installation_token=""
+typeset -g github_installation_token_expires_at=0
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -26,6 +30,27 @@ timestamp() {
 
 log() {
   print -r -- "$(timestamp) $*"
+}
+
+acquire_controller_lock() {
+  local owner_pid=""
+  if /bin/mkdir "$lock_directory" 2>/dev/null; then
+    printf '%s\n' $$ >"${lock_directory}/owner.pid"
+    return 0
+  fi
+  [[ -r "${lock_directory}/owner.pid" ]] && read -r owner_pid <"${lock_directory}/owner.pid"
+  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then
+    return 1
+  fi
+  /bin/rm -f "${lock_directory}/owner.pid"
+  /bin/rmdir "$lock_directory" 2>/dev/null || return 1
+  /bin/mkdir "$lock_directory" 2>/dev/null || return 1
+  printf '%s\n' $$ >"${lock_directory}/owner.pid"
+}
+
+release_controller_lock() {
+  /bin/rm -f "${lock_directory}/owner.pid"
+  /bin/rmdir "$lock_directory" >/dev/null 2>&1 || true
 }
 
 base64url() {
@@ -44,19 +69,39 @@ github_jwt() {
   printf '%s.%s' "$unsigned" "$signature"
 }
 
-registration_token() {
-  local repository="$1" jwt installation_token
+ensure_installation_token() {
+  local jwt now response
+  now=$(/bin/date +%s)
+  if [[ -n "$github_installation_token" ]] && (( now < github_installation_token_expires_at )); then
+    return 0
+  fi
   jwt=$(github_jwt) || return 1
-  installation_token=$(
+  response=$(
     /usr/bin/curl -fsS -X POST \
       -H "Authorization: Bearer $jwt" \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "https://api.github.com/app/installations/${installation_id}/access_tokens" |
-      /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+      "https://api.github.com/app/installations/${installation_id}/access_tokens"
   ) || return 1
+  github_installation_token=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || return 1
+  github_installation_token_expires_at=$(( now + 3000 ))
+}
+
+github_api() {
+  local method="$1" endpoint="$2"
+  ensure_installation_token || return 1
+  /usr/bin/curl -fsS -X "$method" \
+    -H "Authorization: Bearer $github_installation_token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/${endpoint}"
+}
+
+registration_token() {
+  local repository="$1"
+  ensure_installation_token || return 1
   /usr/bin/curl -fsS -X POST \
-    -H "Authorization: Bearer $installation_token" \
+    -H "Authorization: Bearer $github_installation_token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
@@ -64,23 +109,19 @@ registration_token() {
 }
 
 repository_has_queued_job() {
-  local repository="$1" run_id run_ids queued_job_count
-  run_ids=$(
-    /opt/homebrew/bin/gh api \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "repos/${repository}/actions/runs?per_page=20" \
-      --jq '.workflow_runs[] | select(.status == "queued" or .status == "in_progress") | .id'
-  ) || return 1
+  local repository="$1" run_id run_ids queued_job_count status response
+  run_ids=""
+  for status in queued in_progress; do
+    response=$(github_api GET "repos/${repository}/actions/runs?status=${status}&per_page=100") || return 1
+    run_ids+=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
+    run_ids+=$'\n'
+  done
 
   while IFS= read -r run_id; do
     [[ -n "$run_id" ]] || continue
     queued_job_count=$(
-      /opt/homebrew/bin/gh api \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-      --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length'
+      github_api GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+        /usr/bin/python3 -c 'import json,sys; print(sum(1 for job in json.load(sys.stdin)["jobs"] if job["status"] == "queued" and all(label in job["labels"] for label in ("self-hosted", "linux", "arm64", "jai-ci"))))'
     ) || continue
     if [[ "$queued_job_count" == <1-> ]]; then
       return 0
@@ -108,16 +149,14 @@ delete_vm() {
 
 runner_id() {
   local repository="$1" runner_name="$2"
-  /opt/homebrew/bin/gh api \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "repos/${repository}/actions/runners?per_page=100" \
-    --jq ".runners[] | select(.name == \"${runner_name}\") | .id"
+  github_api GET "repos/${repository}/actions/runners?per_page=100" |
+    RUNNER_NAME="$runner_name" /usr/bin/python3 -c 'import json,os,sys; print(next((runner["id"] for runner in json.load(sys.stdin)["runners"] if runner["name"] == os.environ["RUNNER_NAME"]), ""))'
 }
 
-runner_worker_started() {
+runner_process_state() {
   local vm_ip="$1"
-  /usr/bin/ssh \
+  local state
+  state=$(/usr/bin/ssh \
     -o BatchMode=yes \
     -o ConnectTimeout=3 \
     -o ServerAliveInterval=2 \
@@ -126,32 +165,36 @@ runner_worker_started() {
     -o UserKnownHostsFile=/dev/null \
     -i "$ssh_key" \
     "admin@${vm_ip}" \
-    "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null" 2>/dev/null
+    "if /usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null; then printf '%s\\n' worker; elif /usr/bin/pgrep -f '^${runner_root}/bin/Runner.Listener run' >/dev/null; then printf '%s\\n' listener; else printf '%s\\n' absent; fi" 2>/dev/null) || {
+    print unreachable
+    return 0
+  }
+  print -r -- "$state"
 }
 
-runner_listener_started() {
-  local vm_ip="$1"
-  /usr/bin/ssh \
-    -o BatchMode=yes \
-    -o ConnectTimeout=3 \
-    -o ServerAliveInterval=2 \
-    -o ServerAliveCountMax=2 \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -i "$ssh_key" \
+stop_idle_listener() {
+  local vm_ip="$1" state
+  state=$(/usr/bin/ssh \
+    -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$ssh_key" \
     "admin@${vm_ip}" \
-    "/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Listener run' >/dev/null" 2>/dev/null
+    "if /usr/bin/pgrep -f '^${runner_root}/bin/Runner.Worker ' >/dev/null; then printf '%s\\n' worker; else listener_pid=\$(/usr/bin/pgrep -f '^${runner_root}/bin/Runner.Listener run' | /usr/bin/head -n 1); if [[ -n \"\$listener_pid\" ]]; then /bin/kill -TERM \"\$listener_pid\"; printf '%s\\n' draining; else printf '%s\\n' absent; fi; fi" 2>/dev/null) || {
+    print unreachable
+    return 0
+  }
+  print -r -- "$state"
 }
 
 wait_for_runner_shutdown() {
-  local vm_ip="$1" missing_count=0 deadline
+  local vm_ip="$1" missing_count=0 deadline state
   deadline=$(( $(/bin/date +%s) + 3300 ))
   while (( missing_count < 3 && $(/bin/date +%s) < deadline )); do
-    if runner_worker_started "$vm_ip" || runner_listener_started "$vm_ip"; then
-      missing_count=0
-    else
-      (( missing_count += 1 ))
-    fi
+    state=$(runner_process_state "$vm_ip")
+    case "$state" in
+      worker|listener) missing_count=0 ;;
+      absent) (( missing_count += 1 )) ;;
+      unreachable) log "runner probe could not reach ${vm_ip}; preserving execution" ;;
+    esac
     (( missing_count >= 3 )) || /bin/sleep 5
   done
   if (( missing_count < 3 )); then
@@ -164,21 +207,18 @@ delete_runner_registration() {
   local repository="$1" runner_name="$2" id
   id=$(runner_id "$repository" "$runner_name") || return 0
   [[ -n "$id" ]] || return 0
-  /opt/homebrew/bin/gh api --method DELETE \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "repos/${repository}/actions/runners/${id}" >/dev/null
+  github_api DELETE "repos/${repository}/actions/runners/${id}" >/dev/null
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_pid runner_claimed ssh_ready ios_runner_count linux_runner_count
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed ssh_ready ios_runner_count linux_runner_count state missing_count cleanup_allowed
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   vm_pid=""
-  runner_pid=""
   runner_status=1
+  cleanup_allowed=true
 
   while true; do
     ios_runner_count=$(
@@ -189,8 +229,8 @@ run_one_ephemeral_runner() {
       /opt/homebrew/bin/tart list --source local --quiet |
         /usr/bin/grep -c '^trips-linux-runner-job-' || true
     )
-    (( ios_runner_count == 0 || linux_runner_count == 0 )) && break
-    log "waiting because an iOS VM and a Linux runner are already active"
+    (( ios_runner_count == 0 && linux_runner_count == 0 )) && break
+    log "waiting because another Tart job VM is active"
     /bin/sleep 15
   done
 
@@ -198,6 +238,10 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
+    if [[ "$cleanup_allowed" != true ]]; then
+      log "preserving ${vm_name} because safe shutdown was not proven"
+      return 0
+    fi
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
   }
@@ -239,56 +283,51 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh" &
-    runner_pid=$!
+      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; /usr/bin/nohup ./run.sh > runner-controller.log 2>&1 < /dev/null &" || return 1
     runner_claimed=false
     for _ in {1..150}; do
-      if runner_worker_started "$vm_ip"; then
+      state=$(runner_process_state "$vm_ip")
+      if [[ "$state" == worker ]]; then
         runner_claimed=true
         if wait_for_runner_shutdown "$vm_ip"; then
           runner_status=0
         else
           runner_status=1
         fi
-        /bin/kill "$runner_pid" >/dev/null 2>&1 || true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-        runner_pid=""
         break
-      fi
-      if [[ -n "$runner_pid" ]] && ! /bin/kill -0 "$runner_pid" 2>/dev/null; then
-        wait "$runner_pid"
-        runner_status=$?
-        runner_pid=""
-        if ! runner_listener_started "$vm_ip"; then
-          break
-        fi
       fi
       /bin/sleep 2
     done
-    # Recheck after the final sleep so a job accepted at the idle deadline is
-    # not killed without observing its worker.
-    if [[ "$runner_claimed" == false ]] && runner_worker_started "$vm_ip"; then
-      runner_claimed=true
-      if wait_for_runner_shutdown "$vm_ip"; then
+    if [[ "$runner_claimed" == false ]]; then
+      state=$(stop_idle_listener "$vm_ip")
+      missing_count=0
+      for _ in {1..24}; do
+        state=$(runner_process_state "$vm_ip")
+        if [[ "$state" == worker ]]; then
+          runner_claimed=true
+          break
+        elif [[ "$state" == absent ]]; then
+          (( missing_count += 1 ))
+          (( missing_count >= 3 )) && break
+        elif [[ "$state" == listener ]]; then
+          stop_idle_listener "$vm_ip" >/dev/null
+          missing_count=0
+        else
+          missing_count=0
+        fi
+        /bin/sleep 5
+      done
+      if [[ "$runner_claimed" == true ]]; then
+        wait_for_runner_shutdown "$vm_ip" && runner_status=0 || runner_status=1
+      elif (( missing_count >= 3 )); then
+        log "${runner_name} drained without accepting a job; removing it"
+        delete_runner_registration "$repository" "$runner_name" || true
         runner_status=0
       else
+        log "could not prove ${runner_name} idle after draining"
+        cleanup_allowed=false
         runner_status=1
       fi
-      if [[ -n "$runner_pid" ]]; then
-        /bin/kill "$runner_pid" >/dev/null 2>&1 || true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-      fi
-      runner_pid=""
-    fi
-    if [[ "$runner_claimed" == false ]]; then
-      log "${runner_name} remained idle; removing it"
-      if [[ -n "$runner_pid" ]]; then
-        /bin/kill "$runner_pid" 2>/dev/null || true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-      fi
-      runner_pid=""
-      delete_runner_registration "$repository" "$runner_name" || true
-      runner_status=0
     fi
   } always {
     trap - INT TERM
@@ -299,8 +338,13 @@ run_one_ephemeral_runner() {
 }
 
 main() {
-  local repository
+  local repository stale_ip stale_state preserved_stale=false
   umask 077
+  if ! acquire_controller_lock; then
+    log "another Linux runner controller owns ${lock_directory}"
+    return 0
+  fi
+  trap 'release_controller_lock' EXIT
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
     return 1
@@ -321,19 +365,33 @@ main() {
     log "failed to set ${base_vm} memory to ${base_memory_mb} MB"
     return 1
   fi
-  if ! /opt/homebrew/bin/gh auth token >/dev/null 2>&1; then
-    log "GitHub CLI authentication is unavailable"
+  if ! ensure_installation_token; then
+    log "GitHub App authentication is unavailable"
     return 1
   fi
 
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-linux-runner-job-* ]]; then
-      log "removing stale ephemeral VM ${stale_vm}"
+      if stale_ip=$(/opt/homebrew/bin/tart ip "$stale_vm" 2>/dev/null); then
+        stale_state=$(runner_process_state "$stale_ip")
+        if [[ "$stale_state" != absent ]]; then
+          log "preserving ${stale_vm}; live state is ${stale_state}"
+          preserved_stale=true
+          continue
+        fi
+      fi
+      log "removing safely stopped stale ephemeral VM ${stale_vm}"
       delete_vm "$stale_vm"
     fi
   done < <(/opt/homebrew/bin/tart list --source local --quiet)
+  [[ "$preserved_stale" == false ]] || return 1
 
   while true; do
+    if ! ensure_installation_token; then
+      log "GitHub App token refresh failed; retrying in 180 seconds"
+      /bin/sleep 180
+      continue
+    fi
     if repository=$(next_repository); then
       if run_one_ephemeral_runner "$repository"; then
         log "ephemeral runner cycle completed for ${repository}"
