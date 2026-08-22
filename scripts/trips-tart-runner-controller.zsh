@@ -36,19 +36,7 @@ log() {
 }
 
 acquire_lock() {
-  local lock_path="$1" owner_pid="" candidate
-  candidate="${lock_path}.$$"
-  printf '%s\n' $$ >"$candidate"
-  if /bin/ln "$candidate" "$lock_path" 2>/dev/null; then
-    /bin/rm -f "$candidate"
-    return 0
-  fi
-  /bin/rm -f "$candidate"
-  [[ -r "$lock_path" ]] || return 1
-  read -r owner_pid <"$lock_path"
-  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then return 1; fi
-  /bin/rm -f "$lock_path"
-  acquire_lock "$lock_path"
+  /usr/bin/shlock -f "$1" -p $$
 }
 
 release_lock() {
@@ -427,7 +415,10 @@ main() {
   done
 
   while true; do
-    if repository_has_queued_native_job; then
+    if ! ensure_installation_token; then
+      log "GitHub App authentication is unavailable; retrying in 30 seconds"
+      /bin/sleep 30
+    elif repository_has_queued_native_job; then
       if run_one_ephemeral_runner; then
         log "ephemeral runner cycle completed"
       else

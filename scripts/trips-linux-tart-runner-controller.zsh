@@ -18,6 +18,7 @@ readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
 readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
 readonly native_priority_file="${TRIPS_TART_NATIVE_PRIORITY_FILE:-/Users/jai/Library/Logs/trips-tart-runner-native-priority}"
+readonly lane_poll_seconds="${TRIPS_TART_LANE_POLL_SECONDS:-15}"
 
 typeset -g github_installation_token=""
 typeset -g github_installation_token_expires_at=0
@@ -35,19 +36,7 @@ log() {
 }
 
 acquire_lock() {
-  local lock_path="$1" owner_pid="" candidate
-  candidate="${lock_path}.$$"
-  printf '%s\n' $$ >"$candidate"
-  if /bin/ln "$candidate" "$lock_path" 2>/dev/null; then
-    /bin/rm -f "$candidate"
-    return 0
-  fi
-  /bin/rm -f "$candidate"
-  [[ -r "$lock_path" ]] || return 1
-  read -r owner_pid <"$lock_path"
-  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then return 1; fi
-  /bin/rm -f "$lock_path"
-  acquire_lock "$lock_path"
+  /usr/bin/shlock -f "$1" -p $$
 }
 
 release_lock() {
@@ -70,6 +59,21 @@ native_lane_priority_requested() {
   fi
   /bin/rm -f "$native_priority_file"
   return 1
+}
+
+acquire_linux_lane() {
+  while true; do
+    native_lane_priority_requested && return 2
+    if acquire_lane_lock; then
+      if native_lane_priority_requested; then
+        release_lane_lock
+        return 2
+      fi
+      return 0
+    fi
+    log "waiting because another Tart job VM is active"
+    /bin/sleep "$lane_poll_seconds"
+  done
 }
 
 base64url() {
@@ -253,7 +257,7 @@ delete_runner_registration() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed ssh_ready state missing_count cleanup_allowed registration_state lane_lock_owned
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed ssh_ready state missing_count cleanup_allowed registration_state lane_lock_owned lane_result
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -263,10 +267,10 @@ run_one_ephemeral_runner() {
   cleanup_allowed=true
   lane_lock_owned=false
 
-  while ! acquire_lane_lock; do
-    log "waiting because another Tart job VM is active"
-    /bin/sleep 15
-  done
+  acquire_linux_lane
+  lane_result=$?
+  (( lane_result == 2 )) && return 2
+  (( lane_result == 0 )) || return 1
   lane_lock_owned=true
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
@@ -392,7 +396,7 @@ run_one_ephemeral_runner() {
 }
 
 main() {
-  local repository stale_ip stale_state preserved_stale=false
+  local repository runner_result stale_ip stale_state preserved_stale=false
   umask 077
   if ! acquire_controller_lock; then
     log "another Linux runner controller owns ${lock_directory}"
@@ -459,17 +463,19 @@ main() {
       continue
     fi
     if repository=$(next_repository); then
-      if native_lane_priority_requested; then
-        log "yielding the shared Tart lane to the waiting native controller"
-        /bin/sleep 15
-        continue
-      fi
-      if run_one_ephemeral_runner "$repository"; then
-        log "ephemeral runner cycle completed for ${repository}"
-      else
-        log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
-        /bin/sleep 15
-      fi
+      run_one_ephemeral_runner "$repository"
+      runner_result=$?
+      case "$runner_result" in
+        0) log "ephemeral runner cycle completed for ${repository}" ;;
+        2)
+          log "yielding the shared Tart lane to the waiting native controller"
+          /bin/sleep "$lane_poll_seconds"
+          ;;
+        *)
+          log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
+          /bin/sleep 15
+          ;;
+      esac
     else
       # Server-side status filters avoid losing active runs behind completed runs.
       # A pass costs at most 336 requests, preserving at least 1,164 in reserve.

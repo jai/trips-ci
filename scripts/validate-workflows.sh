@@ -27,6 +27,13 @@ actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
+zsh -n \
+  "$repo_root/scripts/start-trips-linux-tart-runner.command" \
+  "$repo_root/scripts/start-trips-tart-runner.command" \
+  "$repo_root/scripts/trips-linux-tart-runner-controller.zsh" \
+  "$repo_root/scripts/trips-tart-runner-controller.zsh" \
+  "$repo_root/tests/runner-controller-priority-test.zsh"
+"$repo_root/tests/runner-controller-priority-test.zsh"
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \
   "$repo_root/.github/workflows" \
