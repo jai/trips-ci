@@ -56,8 +56,9 @@ acquire_priority_lock() { acquire_lock "$native_priority_lock"; }
 release_priority_lock() { release_lock "$native_priority_lock"; }
 
 shared_lane_has_ephemeral_vm() {
-  /opt/homebrew/bin/tart list --source local --quiet |
-    /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
+  local vm_list
+  vm_list=$(/opt/homebrew/bin/tart list --source local --quiet) || return 0
+  printf '%s\n' "$vm_list" | /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
 }
 
 acquire_clean_lane_lock() {
@@ -135,11 +136,18 @@ registration_token() {
 }
 
 repository_has_queued_native_job() {
-  local run_id run_ids="" run_status queued_job_count
+  local page response run_count run_id run_ids="" run_status queued_job_count
   for run_status in queued in_progress; do
-    run_ids+=$(github_api GET "repos/${repository}/actions/runs?status=${run_status}&per_page=20" |
-      /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
-    run_ids+=$'\n'
+    page=1
+    while true; do
+      response=$(github_api GET "repos/${repository}/actions/runs?status=${run_status}&per_page=100&page=${page}") || return 1
+      run_ids+=$(printf '%s' "$response" |
+        /usr/bin/python3 -c 'import json,sys; print("\n".join(str(run["id"]) for run in json.load(sys.stdin)["workflow_runs"]))') || return 1
+      run_ids+=$'\n'
+      run_count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin)["workflow_runs"]))') || return 1
+      (( run_count < 100 )) && break
+      (( page += 1 ))
+    done
   done
 
   while IFS= read -r run_id; do
@@ -151,6 +159,13 @@ repository_has_queued_native_job() {
     fi
   done <<<"$run_ids"
   return 1
+}
+
+installation_api_has_headroom() {
+  local remaining
+  remaining=$(github_api GET rate_limit |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["remaining"])') || return 1
+  [[ "$remaining" == <1500-> ]]
 }
 
 delete_vm() {
@@ -386,11 +401,12 @@ run_one_ephemeral_runner() {
       wait "$vm_pid" >/dev/null 2>&1 || true
     fi
   }
+  [[ "$cleanup_allowed" == true ]] || runner_status=3
   return "$runner_status"
 }
 
 main() {
-  local stale_ip stale_state preserved_stale=false
+  local runner_result stale_ip stale_state preserved_stale=false
   umask 077
   if ! acquire_controller_lock; then
     log "another iOS runner controller owns ${lock_directory}"
@@ -443,13 +459,23 @@ main() {
     if ! ensure_installation_token; then
       log "GitHub App authentication is unavailable; retrying in 30 seconds"
       /bin/sleep 30
+    elif ! installation_api_has_headroom; then
+      log "GitHub App API has less than 1,500 core requests remaining; pausing discovery for 180 seconds"
+      /bin/sleep 180
     elif repository_has_queued_native_job; then
-      if run_one_ephemeral_runner; then
-        log "ephemeral runner cycle completed"
-      else
-        log "ephemeral runner cycle failed; retrying in 30 seconds"
-        /bin/sleep 30
-      fi
+      run_one_ephemeral_runner
+      runner_result=$?
+      case "$runner_result" in
+        0) log "ephemeral runner cycle completed" ;;
+        3)
+          log "preserved an ambiguous runner; exiting for startup reconciliation"
+          return 1
+          ;;
+        *)
+          log "ephemeral runner cycle failed; retrying in 30 seconds"
+          /bin/sleep 30
+          ;;
+      esac
     else
       /bin/sleep 15
     fi

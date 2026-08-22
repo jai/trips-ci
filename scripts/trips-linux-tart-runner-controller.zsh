@@ -56,8 +56,9 @@ acquire_priority_lock() { acquire_lock "$native_priority_lock"; }
 release_priority_lock() { release_lock "$native_priority_lock"; }
 
 shared_lane_has_ephemeral_vm() {
-  /opt/homebrew/bin/tart list --source local --quiet |
-    /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
+  local vm_list
+  vm_list=$(/opt/homebrew/bin/tart list --source local --quiet) || return 0
+  printf '%s\n' "$vm_list" | /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
 }
 
 acquire_clean_lane_lock() {
@@ -418,6 +419,7 @@ run_one_ephemeral_runner() {
       wait "$vm_pid" >/dev/null 2>&1 || true
     fi
   }
+  [[ "$cleanup_allowed" == true ]] || runner_status=3
   return "$runner_status"
 }
 
@@ -496,6 +498,10 @@ main() {
         2)
           log "yielding the shared Tart lane to the waiting native controller"
           /bin/sleep "$lane_poll_seconds"
+          ;;
+        3)
+          log "preserved an ambiguous runner; exiting for startup reconciliation"
+          return 1
           ;;
         *)
           log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
