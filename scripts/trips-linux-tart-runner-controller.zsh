@@ -16,6 +16,7 @@ readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 readonly lock_directory="${log_directory}/controller.lock"
+readonly lane_lock_directory="/Users/jai/Library/Logs/trips-tart-runner-lane.lock"
 
 typeset -g github_installation_token=""
 typeset -g github_installation_token_expires_at=0
@@ -38,7 +39,8 @@ acquire_controller_lock() {
     printf '%s\n' $$ >"${lock_directory}/owner.pid"
     return 0
   fi
-  [[ -r "${lock_directory}/owner.pid" ]] && read -r owner_pid <"${lock_directory}/owner.pid"
+  [[ -r "${lock_directory}/owner.pid" ]] || return 1
+  read -r owner_pid <"${lock_directory}/owner.pid"
   if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then
     return 1
   fi
@@ -51,6 +53,26 @@ acquire_controller_lock() {
 release_controller_lock() {
   /bin/rm -f "${lock_directory}/owner.pid"
   /bin/rmdir "$lock_directory" >/dev/null 2>&1 || true
+}
+
+acquire_lane_lock() {
+  local owner_pid=""
+  if /bin/mkdir "$lane_lock_directory" 2>/dev/null; then
+    printf '%s\n' $$ >"${lane_lock_directory}/owner.pid"
+    return 0
+  fi
+  [[ -r "${lane_lock_directory}/owner.pid" ]] || return 1
+  read -r owner_pid <"${lane_lock_directory}/owner.pid"
+  if [[ "$owner_pid" == <1-> ]] && /bin/kill -0 "$owner_pid" 2>/dev/null; then return 1; fi
+  /bin/rm -f "${lane_lock_directory}/owner.pid"
+  /bin/rmdir "$lane_lock_directory" 2>/dev/null || return 1
+  /bin/mkdir "$lane_lock_directory" 2>/dev/null || return 1
+  printf '%s\n' $$ >"${lane_lock_directory}/owner.pid"
+}
+
+release_lane_lock() {
+  /bin/rm -f "${lane_lock_directory}/owner.pid"
+  /bin/rmdir "$lane_lock_directory" >/dev/null 2>&1 || true
 }
 
 base64url() {
@@ -157,12 +179,22 @@ delete_vm() {
   local vm_name="$1"
   /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
   /opt/homebrew/bin/tart delete "$vm_name" >/dev/null 2>&1 || true
+  ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "$vm_name" || {
+    log "failed to delete ${vm_name}"
+    return 1
+  }
 }
 
 runner_id() {
   local repository="$1" runner_name="$2"
   github_api GET "repos/${repository}/actions/runners?per_page=100" |
     RUNNER_NAME="$runner_name" /usr/bin/python3 -c 'import json,os,sys; print(next((runner["id"] for runner in json.load(sys.stdin)["runners"] if runner["name"] == os.environ["RUNNER_NAME"]), ""))'
+}
+
+runner_registration_state() {
+  local repository="$1" runner_name="$2"
+  github_api GET "repos/${repository}/actions/runners?per_page=100" |
+    RUNNER_NAME="$runner_name" /usr/bin/python3 -c 'import json,os,sys; runner=next((r for r in json.load(sys.stdin)["runners"] if r["name"] == os.environ["RUNNER_NAME"]), None); print("missing" if runner is None else ("busy" if runner["busy"] else "idle"))' || print unreachable
 }
 
 runner_process_state() {
@@ -223,7 +255,7 @@ delete_runner_registration() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed ssh_ready ios_runner_count linux_runner_count state missing_count cleanup_allowed
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status runner_claimed ssh_ready state missing_count cleanup_allowed registration_state lane_lock_owned
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -231,23 +263,20 @@ run_one_ephemeral_runner() {
   vm_pid=""
   runner_status=1
   cleanup_allowed=true
+  lane_lock_owned=false
 
-  while true; do
-    ios_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-runner-job-' || true
-    )
-    linux_runner_count=$(
-      /opt/homebrew/bin/tart list --source local --quiet |
-        /usr/bin/grep -c '^trips-linux-runner-job-' || true
-    )
-    (( ios_runner_count == 0 && linux_runner_count == 0 )) && break
+  while ! acquire_lane_lock; do
     log "waiting because another Tart job VM is active"
     /bin/sleep 15
   done
+  lane_lock_owned=true
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
-  /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
+  /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || {
+    release_lane_lock
+    lane_lock_owned=false
+    return 1
+  }
 
   cleanup_vm() {
     if [[ "$cleanup_allowed" != true ]]; then
@@ -255,7 +284,9 @@ run_one_ephemeral_runner() {
       return 0
     fi
     log "deleting ${vm_name}"
-    delete_vm "$vm_name"
+    delete_vm "$vm_name" || return 1
+    [[ "$lane_lock_owned" != true ]] || release_lane_lock
+    lane_lock_owned=false
   }
   trap 'cleanup_vm; exit 0' INT TERM
 
@@ -295,7 +326,10 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; /usr/bin/nohup ./run.sh > runner-controller.log 2>&1 < /dev/null &" || return 1
+      "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; /usr/bin/nohup ./run.sh > runner-controller.log 2>&1 < /dev/null &" || {
+        cleanup_allowed=false
+        return 1
+      }
     runner_claimed=false
     for _ in {1..150}; do
       state=$(runner_process_state "$vm_ip")
@@ -320,7 +354,7 @@ run_one_ephemeral_runner() {
           break
         elif [[ "$state" == absent ]]; then
           (( missing_count += 1 ))
-          (( missing_count >= 3 )) && break
+          (( missing_count >= 6 )) && break
         elif [[ "$state" == listener ]]; then
           stop_idle_listener "$vm_ip" >/dev/null
           missing_count=0
@@ -331,10 +365,20 @@ run_one_ephemeral_runner() {
       done
       if [[ "$runner_claimed" == true ]]; then
         wait_for_runner_shutdown "$vm_ip" && runner_status=0 || runner_status=1
-      elif (( missing_count >= 3 )); then
-        log "${runner_name} drained without accepting a job; removing it"
-        delete_runner_registration "$repository" "$runner_name" || true
-        runner_status=0
+      elif (( missing_count >= 6 )); then
+        registration_state=$(runner_registration_state "$repository" "$runner_name")
+        if [[ "$registration_state" == busy ]]; then
+          runner_claimed=true
+          wait_for_runner_shutdown "$vm_ip" && runner_status=0 || runner_status=1
+        elif [[ "$registration_state" == idle || "$registration_state" == missing ]]; then
+          log "${runner_name} drained without accepting a job; removing it"
+          delete_runner_registration "$repository" "$runner_name" || true
+          runner_status=0
+        else
+          log "could not verify ${runner_name} registration state"
+          cleanup_allowed=false
+          runner_status=1
+        fi
       else
         log "could not prove ${runner_name} idle after draining"
         cleanup_allowed=false
@@ -343,7 +387,7 @@ run_one_ephemeral_runner() {
     fi
   } always {
     trap - INT TERM
-    cleanup_vm
+    cleanup_vm || runner_status=1
     [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
   }
   return "$runner_status"
@@ -392,6 +436,14 @@ main() {
         stale_state=$(runner_process_state "$stale_ip")
         if [[ "$stale_state" != absent ]]; then
           log "preserving ${stale_vm}; live state is ${stale_state}"
+          preserved_stale=true
+          continue
+        fi
+      else
+        stale_state=$(/opt/homebrew/bin/tart list --source local --format json |
+          VM_NAME="$stale_vm" /usr/bin/python3 -c 'import json,os,sys; print(next((vm["State"] for vm in json.load(sys.stdin) if vm["Name"] == os.environ["VM_NAME"]), "unknown"))')
+        if [[ "$stale_state" != stopped ]]; then
+          log "preserving ${stale_vm}; state is ${stale_state} and no IP was available"
           preserved_stale=true
           continue
         fi
