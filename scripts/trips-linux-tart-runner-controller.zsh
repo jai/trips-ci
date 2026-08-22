@@ -69,7 +69,7 @@ repository_has_queued_job() {
     /opt/homebrew/bin/gh api \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "repos/${repository}/actions/runs?per_page=30" \
+      "repos/${repository}/actions/runs?per_page=20" \
       --jq '.workflow_runs[] | select(.status == "queued" or .status == "in_progress") | .id'
   ) || return 1
 
@@ -338,9 +338,10 @@ main() {
         /bin/sleep 15
       fi
     else
-      # Eight repositories are inspected per pass. A 30-second cadence keeps
-      # idle discovery prompt without exhausting the user API allowance.
-      /bin/sleep 30
+      # At most 168 REST reads are made per full pass (eight repositories,
+      # one run list and up to twenty active-run job lists each). A three-minute
+      # idle cadence leaves API headroom while keeping discovery below five minutes.
+      /bin/sleep 180
     fi
   done
 }
