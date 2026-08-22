@@ -255,6 +255,16 @@ stop_idle_listener() {
   print -r -- "$state"
 }
 
+reconcile_stale_runner_state() {
+  local vm_ip="$1" state="$2"
+  if [[ "$state" == listener ]]; then
+    state=$(stop_idle_listener "$vm_ip")
+    [[ "$state" != draining ]] || /bin/sleep 5
+    state=$(runner_process_state "$vm_ip")
+  fi
+  print -r -- "$state"
+}
+
 wait_for_runner_shutdown() {
   local vm_ip="$1" missing_count=0 deadline state
   deadline=$(( $(/bin/date +%s) + 3300 ))
@@ -464,6 +474,7 @@ main() {
     if [[ "$stale_vm" == trips-linux-runner-job-* ]]; then
       if stale_ip=$(/opt/homebrew/bin/tart ip "$stale_vm" 2>/dev/null); then
         stale_state=$(runner_process_state "$stale_ip")
+        stale_state=$(reconcile_stale_runner_state "$stale_ip" "$stale_state")
         if [[ "$stale_state" != absent ]]; then
           log "preserving ${stale_vm}; live state is ${stale_state}"
           preserved_stale=true

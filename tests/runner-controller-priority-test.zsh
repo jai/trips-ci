@@ -54,6 +54,12 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     release_native_lane_priority
     [[ ! -e "$TRIPS_TART_NATIVE_PRIORITY_FILE" ]]
 
+    stop_idle_listener() { print draining; }
+    runner_process_state() { print absent; }
+    sleep() { return 0; }
+    [[ "$(reconcile_stale_runner_state 192.0.2.1 listener)" == absent ]]
+    [[ "$(reconcile_stale_runner_state 192.0.2.1 worker)" == worker ]]
+
     github_api() {
       local method="$1" endpoint="$2"
       if [[ "$endpoint" == *"actions/runs?status=queued"* ]]; then
@@ -65,6 +71,18 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
       fi
     }
     repository_has_queued_native_job
+
+    github_api() {
+      local method="$1" endpoint="$2"
+      if [[ "$endpoint" == *"actions/runs?status=queued"* ]]; then
+        print "{\"workflow_runs\":[{\"id\":44}]}"
+      elif [[ "$endpoint" == *"actions/runs?status=in_progress"* ]]; then
+        print "{\"workflow_runs\":[]}"
+      else
+        print "{\"jobs\":[{\"status\":\"queued\",\"labels\":[\"self-hosted\",\"macOS\",\"ARM64\",\"tart\",\"ios\",\"other-host\"]}]}"
+      fi
+    }
+    ! repository_has_queued_native_job
 
     github_api() {
       local method="$1" endpoint="$2"

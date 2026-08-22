@@ -153,7 +153,7 @@ repository_has_queued_native_job() {
   while IFS= read -r run_id; do
     [[ -n "$run_id" ]] || continue
     queued_job_count=$(github_api GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
-      /usr/bin/python3 -c 'import json,sys; required={"self-hosted","macOS","ARM64","tart","ios"}; print(sum(job["status"] == "queued" and required.issubset(job["labels"]) for job in json.load(sys.stdin)["jobs"]))') || continue
+      AVAILABLE_LABELS="self-hosted,macOS,ARM64,${runner_labels}" /usr/bin/python3 -c 'import json,os,sys; available=set(os.environ["AVAILABLE_LABELS"].split(",")); print(sum(job["status"] == "queued" and set(job["labels"]).issubset(available) for job in json.load(sys.stdin)["jobs"]))') || continue
     if [[ "$queued_job_count" == <1-> ]]; then
       return 0
     fi
@@ -214,6 +214,16 @@ stop_idle_listener() {
     print unreachable
     return 0
   }
+  print -r -- "$state"
+}
+
+reconcile_stale_runner_state() {
+  local vm_ip="$1" state="$2"
+  if [[ "$state" == listener ]]; then
+    state=$(stop_idle_listener "$vm_ip")
+    [[ "$state" != draining ]] || /bin/sleep 5
+    state=$(runner_process_state "$vm_ip")
+  fi
   print -r -- "$state"
 }
 
@@ -431,6 +441,7 @@ main() {
     if [[ "$stale_vm" == trips-runner-job-* ]]; then
       if stale_ip=$(/opt/homebrew/bin/tart ip "$stale_vm" 2>/dev/null); then
         stale_state=$(runner_process_state "$stale_ip")
+        stale_state=$(reconcile_stale_runner_state "$stale_ip" "$stale_state")
         if [[ "$stale_state" != absent ]]; then
           log "preserving ${stale_vm}; live state is ${stale_state}"
           preserved_stale=true
