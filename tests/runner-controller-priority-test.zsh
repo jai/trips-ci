@@ -41,6 +41,16 @@ TRIPS_TART_LANE_POLL_SECONDS=0 \
     ! supervise_claimed_runner 192.0.2.1
     [[ "$cleanup_allowed" == false ]]
 
+    vm_list=$(printf "base\ntrips-linux-runner-job-test\n")
+    set +e
+    clone_artifact_result trips-linux-runner-job-test 0 "$vm_list"; result=$?
+    [[ $result == 3 ]]
+    clone_artifact_result trips-linux-runner-job-other 0 "$vm_list"; result=$?
+    [[ $result == 1 ]]
+    clone_artifact_result trips-linux-runner-job-test 1 ""; result=$?
+    [[ $result == 3 ]]
+    set -e
+
     acquire_lane_lock() { return 0; }
     shared_lane_has_ephemeral_vm() { return 0; }
     lane_released=false
@@ -71,6 +81,16 @@ TRIPS_TART_NATIVE_PRIORITY_FILE="${scratch_directory}/native-priority" \
     typeset -g cleanup_allowed=true
     ! supervise_claimed_runner 192.0.2.1
     [[ "$cleanup_allowed" == false ]]
+
+    vm_list=$(printf "base\ntrips-runner-job-test\n")
+    set +e
+    clone_artifact_result trips-runner-job-test 0 "$vm_list"; result=$?
+    [[ $result == 3 ]]
+    clone_artifact_result trips-runner-job-other 0 "$vm_list"; result=$?
+    [[ $result == 1 ]]
+    clone_artifact_result trips-runner-job-test 1 ""; result=$?
+    [[ $result == 3 ]]
+    set -e
 
     github_api() {
       local method="$1" endpoint="$2"

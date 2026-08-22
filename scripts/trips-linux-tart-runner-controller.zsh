@@ -61,6 +61,23 @@ shared_lane_has_ephemeral_vm() {
   printf '%s\n' "$vm_list" | /usr/bin/grep -Eq '^trips-(linux-)?runner-job-'
 }
 
+clone_artifact_result() {
+  local vm_name="$1" list_status="$2" vm_list="$3"
+  (( list_status == 0 )) || return 3
+  if printf '%s\n' "$vm_list" | /usr/bin/grep -qx "$vm_name"; then
+    log "clone failed after creating ${vm_name}; exiting for startup reconciliation"
+    return 3
+  fi
+  return 1
+}
+
+failed_clone_result() {
+  local vm_name="$1" vm_list list_status
+  vm_list=$(/opt/homebrew/bin/tart list --source local --quiet)
+  list_status=$?
+  clone_artifact_result "$vm_name" "$list_status" "$vm_list"
+}
+
 acquire_clean_lane_lock() {
   acquire_lane_lock || return 1
   if shared_lane_has_ephemeral_vm; then
@@ -322,7 +339,8 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || {
     release_lane_lock
     lane_lock_owned=false
-    return 1
+    failed_clone_result "$vm_name"
+    return $?
   }
 
   cleanup_vm() {
@@ -376,7 +394,7 @@ run_one_ephemeral_runner() {
       "admin@${vm_ip}" \
       "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; /usr/bin/nohup ./run.sh > runner-controller.log 2>&1 < /dev/null &" || {
         cleanup_allowed=false
-        return 1
+        return 3
       }
     runner_claimed=false
     for _ in {1..150}; do
@@ -437,7 +455,8 @@ run_one_ephemeral_runner() {
     trap - INT TERM
     if ! cleanup_vm; then
       cleanup_allowed=false
-      runner_status=1
+      log "VM cleanup failed; exiting for startup reconciliation"
+      exit 1
     fi
     if [[ "$cleanup_allowed" == true && -n "$vm_pid" ]]; then
       wait "$vm_pid" >/dev/null 2>&1 || true
