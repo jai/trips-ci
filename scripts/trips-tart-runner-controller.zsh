@@ -75,6 +75,8 @@ runner_worker_started() {
   /usr/bin/ssh \
     -o BatchMode=yes \
     -o ConnectTimeout=3 \
+    -o ServerAliveInterval=2 \
+    -o ServerAliveCountMax=2 \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -i "$ssh_key" \
@@ -181,6 +183,13 @@ run_one_ephemeral_runner() {
       /bin/sleep 5
     done
 
+    # Recheck after the final sleep so a job accepted at the idle deadline is
+    # not killed without observing its worker.
+    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" >/dev/null 2>&1 && runner_worker_started "$vm_ip"; then
+      runner_claimed=true
+      wait "$runner_pid"
+      runner_status=$?
+    fi
     if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" >/dev/null 2>&1; then
       log "${runner_name} remained idle; removing it"
       /bin/kill "$runner_pid" >/dev/null 2>&1 || true
