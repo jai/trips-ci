@@ -24,6 +24,10 @@ case "${FAKE_SCENARIO:-}" in
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
       print -r -- $'202\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
+      if [[ "$request" == *'index("borg-cube-03")'* ]]; then
+        print -u2 -- 'Queued-job detection must not require a controller-specific host label'
+        exit 1
+      fi
       print -r -- '1'
     fi
     ;;

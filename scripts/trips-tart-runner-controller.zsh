@@ -121,7 +121,7 @@ repository_has_queued_job() {
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
         "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("macOS")) and (.labels | index("ARM64")) and (.labels | index("borg-cube-03")) and (.labels | index("tart")) and (.labels | index("ios")))] | length' |
+        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("macOS")) and (.labels | index("ARM64")) and (.labels | index("tart")) and (.labels | index("ios")))] | length' |
         /usr/bin/grep -qxv '0'; then
         return 0
       fi
