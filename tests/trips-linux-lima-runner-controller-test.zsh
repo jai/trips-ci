@@ -65,4 +65,14 @@ fi
 kill "$fake_runner_pid" 2>/dev/null || true
 wait "$fake_runner_pid" 2>/dev/null || true
 
+( exit 23 ) &
+fake_runner_pid=$!
+if wait_for_runner_claim 'jai/tonegate' 'test-runner' "$fake_runner_pid"; then
+  print -u2 -- 'Expected an exited runner process to remain a failure'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+wait "$fake_runner_pid" 2>/dev/null || true
+
 print -r -- 'Linux Lima controller selection and claim lifecycle passed.'

@@ -91,6 +91,19 @@ else
 fi
 kill "$fake_runner_pid" 2>/dev/null || true
 wait "$fake_runner_pid" 2>/dev/null || true
+
+(
+  exit 23
+) &
+fake_runner_pid=$!
+if wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"; then
+  print -u2 -- 'Expected an exited runner process to remain a failure'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+wait "$fake_runner_pid" 2>/dev/null || true
+
 export FAKE_SCENARIO=incompatible-host
 if next_repository >/dev/null; then
   print -u2 -- 'Expected a job with an incompatible host label to be rejected'

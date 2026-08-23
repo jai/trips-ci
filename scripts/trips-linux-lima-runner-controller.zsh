@@ -221,13 +221,12 @@ delete_vm() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name token runner_name runner_pid runner_status runner_claimed
+  local repository="$1" suffix vm_name token runner_name runner_pid runner_status
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-${slot}-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   runner_pid=""
   runner_status=1
-  runner_claimed=false
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   /opt/homebrew/bin/limactl clone "$base_vm" "$vm_name" \
@@ -254,7 +253,6 @@ run_one_ephemeral_runner() {
     local claim_result=$?
     case "$claim_result" in
       0)
-        runner_claimed=true
         log "${runner_name} claimed a job"
         release_selection_lock
         wait "$runner_pid"
@@ -265,15 +263,12 @@ run_one_ephemeral_runner() {
         runner_status=$?
         ;;
       2)
-        runner_claimed=false
+        log "${runner_name} remained idle; removing it"
+        /bin/kill "$runner_pid" 2>/dev/null || true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+        runner_status=0
         ;;
     esac
-    if [[ "$runner_claimed" == false ]]; then
-      log "${runner_name} remained idle; removing it"
-      /bin/kill "$runner_pid" 2>/dev/null || true
-      wait "$runner_pid" >/dev/null 2>&1 || true
-      runner_status=0
-    fi
   } always {
     release_selection_lock
     trap - INT TERM

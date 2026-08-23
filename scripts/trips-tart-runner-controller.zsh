@@ -222,7 +222,7 @@ delete_vm() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status runner_claimed work_disk ssh_ready linux_runner_count
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -231,7 +231,6 @@ run_one_ephemeral_runner() {
   vm_pid=""
   runner_pid=""
   runner_status=1
-  runner_claimed=false
 
   while true; do
     linux_runner_count=$(
@@ -308,7 +307,6 @@ run_one_ephemeral_runner() {
     local claim_result=$?
     case "$claim_result" in
       0)
-        runner_claimed=true
         log "${runner_name} claimed a job"
         wait "$runner_pid"
         runner_status=$?
@@ -318,15 +316,12 @@ run_one_ephemeral_runner() {
         runner_status=$?
         ;;
       2)
-        runner_claimed=false
+        log "${runner_name} remained idle; removing it"
+        /bin/kill "$runner_pid" 2>/dev/null || true
+        wait "$runner_pid" >/dev/null 2>&1 || true
+        runner_status=0
         ;;
     esac
-    if [[ "$runner_claimed" == false ]]; then
-      log "${runner_name} remained idle; removing it"
-      /bin/kill "$runner_pid" 2>/dev/null || true
-      wait "$runner_pid" >/dev/null 2>&1 || true
-      runner_status=0
-    fi
   } always {
     trap - INT TERM
     cleanup_vm
