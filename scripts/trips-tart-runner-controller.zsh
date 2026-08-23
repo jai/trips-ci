@@ -5,7 +5,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
-readonly repository="${TRIPS_TART_REPOSITORY:-jai/trips-frontend}"
+readonly repositories="${TRIPS_TART_REPOSITORIES:-jai/trips-frontend,jai/tonegate}"
 readonly base_vm="${TRIPS_TART_BASE_VM:-trips-runner-base}"
 readonly base_cpus="${TRIPS_TART_BASE_CPUS:-4}"
 readonly base_memory_mb="${TRIPS_TART_BASE_MEMORY_MB:-16384}"
@@ -17,7 +17,9 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
 readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-tart-runner/work-disks}"
+readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-1}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
+readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -48,7 +50,7 @@ github_jwt() {
 }
 
 registration_token() {
-  local jwt installation_token
+  local repository="$1" jwt installation_token
   jwt=$(github_jwt) || return 1
   installation_token=$(
     /usr/bin/curl -fsS -X POST \
@@ -78,7 +80,7 @@ installation_token() {
 }
 
 runner_id() {
-  local runner_name="$1" token
+  local repository="$1" runner_name="$2" token
   token=$(installation_token) || return 1
   /usr/bin/curl -fsS \
     -H "Authorization: Bearer $token" \
@@ -89,8 +91,8 @@ runner_id() {
 }
 
 delete_runner_registration() {
-  local runner_name="$1" id token
-  id=$(runner_id "$runner_name") || return 0
+  local repository="$1" runner_name="$2" id token
+  id=$(runner_id "$repository" "$runner_name") || return 0
   [[ -n "$id" ]] || return 0
   token=$(installation_token) || return 1
   /usr/bin/curl -fsS -X DELETE \
@@ -100,6 +102,53 @@ delete_runner_registration() {
     "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
 }
 
+repository_is_private() {
+  local repository="$1" token
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}" |
+    /usr/bin/python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("private") is True else 1)'
+}
+
+repository_has_queued_job() {
+  local repository="$1" run_status run_id head_repository
+  for run_status in queued in_progress; do
+    while IFS=$'\t' read -r run_id head_repository; do
+      [[ -n "$run_id" ]] || continue
+      [[ "$head_repository" == "$repository" ]] || continue
+      if "$gh_cli" api \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
+        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("macOS")) and (.labels | index("ARM64")) and (.labels | index("borg-cube-03")) and (.labels | index("tart")) and (.labels | index("ios")))] | length' |
+        /usr/bin/grep -qxv '0'; then
+        return 0
+      fi
+    done < <(
+      "$gh_cli" api \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
+        --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
+    )
+  done
+  return 1
+}
+
+next_repository() {
+  local repository
+  for repository in ${(s:,:)repositories}; do
+    if repository_has_queued_job "$repository"; then
+      printf '%s' "$repository"
+      return 0
+    fi
+  done
+  return 1
+}
+
 delete_vm() {
   local vm_name="$1"
   /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
@@ -107,7 +156,7 @@ delete_vm() {
 }
 
 run_one_ephemeral_runner() {
-  local suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status work_disk ssh_ready linux_runner_count
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status work_disk ssh_ready linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -131,7 +180,7 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
-    delete_runner_registration "$runner_name" || true
+    delete_runner_registration "$repository" "$runner_name" || true
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
     /bin/rm -f "$work_disk"
@@ -171,10 +220,10 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      'set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test "$(df -g / | awk '\''NR == 2 {print $4}'\'')" -ge 20; root_store=$(diskutil info / | awk -F: '\''/APFS Physical Store/{gsub(/ /, "", $2); print $2; exit}'\''); root_device=$(printf "%s" "$root_store" | sed -E "s/s[0-9]+$//"); work_device=$(diskutil list physical | awk '\''/^\/dev\/disk[0-9]+ /{gsub("/dev/", "", $1); print $1}'\'' | grep -v "^${root_device}$"); test "$(printf "%s\n" "$work_device" | wc -l | tr -d " ")" = 1; printf "%s\n" "$root_device" "$work_device" | while IFS= read -r device; do printf "%s\n" "$device" | grep -Eq "^disk[0-9]+$" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT "/dev/$work_device" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q "iOS"; then runtime_ready=true; break; fi; sleep 2; done; [ "$runtime_ready" = true ]; launchctl kill SIGKILL "gui/$(id -u)/com.apple.CoreSimulator.CoreSimulatorService" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/Library/Caches /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag' || return 1
+      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/Library/Caches /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || return 1
 
-    token=$(registration_token) || return 1
-    log "registering ${runner_name}"
+    token=$(registration_token "$repository") || return 1
+    log "registering ${runner_name} for ${repository}"
     printf '%s\n' "$token" | /usr/bin/ssh \
       -o BatchMode=yes \
       -o ConnectTimeout=30 \
@@ -195,6 +244,7 @@ run_one_ephemeral_runner() {
 }
 
 main() {
+  local repository
   umask 077
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
@@ -205,6 +255,16 @@ main() {
     log "required runner credential is missing"
     return 1
   fi
+  if ! "$gh_cli" auth status >/dev/null 2>&1; then
+    log "GitHub CLI authentication is unavailable"
+    return 1
+  fi
+  for repository in ${(s:,:)repositories}; do
+    if ! repository_is_private "$repository"; then
+      log "refusing non-private or unavailable repository ${repository}"
+      return 1
+    fi
+  done
   if ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
     log "base VM ${base_vm} is missing"
     return 1
@@ -230,13 +290,19 @@ main() {
   done
 
   while true; do
-    if run_one_ephemeral_runner; then
-      log "ephemeral runner completed a job"
+    if repository=$(next_repository); then
+      if run_one_ephemeral_runner "$repository"; then
+        log "ephemeral runner completed a job for ${repository}"
+      else
+        log "ephemeral runner cycle failed for ${repository}; retrying in 30 seconds"
+        /bin/sleep 30
+      fi
     else
-      log "ephemeral runner cycle failed; retrying in 30 seconds"
       /bin/sleep 30
     fi
   done
 }
 
-main
+if [[ "${TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY:-false}" != true ]]; then
+  main
+fi

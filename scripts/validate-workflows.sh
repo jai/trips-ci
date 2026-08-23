@@ -33,7 +33,9 @@ zsh -n \
   "$repo_root/scripts/start-trips-linux-lima-runner.zsh" \
   "$repo_root/scripts/start-trips-tart-runner.zsh" \
   "$repo_root/scripts/trips-linux-lima-runner-controller.zsh" \
-  "$repo_root/scripts/trips-tart-runner-controller.zsh"
+  "$repo_root/scripts/trips-tart-runner-controller.zsh" \
+  "$repo_root/tests/trips-tart-runner-controller-test.zsh"
+"$repo_root/tests/trips-tart-runner-controller-test.zsh"
 plist_files=(
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist"
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"

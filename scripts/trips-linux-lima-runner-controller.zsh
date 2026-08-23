@@ -5,7 +5,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
-readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts}"
+readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
 readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
 readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
