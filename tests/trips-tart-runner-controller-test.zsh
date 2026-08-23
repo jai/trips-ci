@@ -152,11 +152,19 @@ if delete_vm 'test-vm'; then
   print -u2 -- 'Expected Tart deletion to fail closed while the VM remains present'
   exit 1
 fi
+if cleanup_runner_vm 'jai/trips-frontend' 'test-runner' 'test-vm' "${test_directory}/work.raw"; then
+  print -u2 -- 'Expected Tart cleanup to propagate VM deletion failure'
+  exit 1
+fi
 export FAKE_VM_PRESENT=false
 delete_vm 'test-vm'
 export FAKE_VM_INVENTORY_ERROR=true
 if delete_vm 'test-vm'; then
   print -u2 -- 'Expected Tart deletion to fail closed when inventory verification fails'
+  exit 1
+fi
+if list_ephemeral_vms >/dev/null; then
+  print -u2 -- 'Expected Tart startup inventory failure to propagate'
   exit 1
 fi
 

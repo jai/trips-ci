@@ -231,6 +231,27 @@ raise SystemExit(0 if any(json.loads(line).get("name") == name for line in sys.s
   fi
 }
 
+list_ephemeral_vms() {
+  local inventory
+  inventory=$("$lima_cli" list --json 2>/dev/null) || {
+    log "unable to inventory Lima VMs"
+    return 1
+  }
+  printf '%s\n' "$inventory" | /usr/bin/python3 -c 'import json,sys
+for line in sys.stdin:
+    if line.strip():
+        name=json.loads(line)["name"]
+        if name.startswith("trips-linux-runner-") and "-job-" in name:
+            print(name)'
+}
+
+cleanup_runner_vm() {
+  local repository="$1" runner_name="$2" vm_name="$3"
+  log "deleting ${vm_name}"
+  delete_vm "$vm_name" || return 1
+  delete_runner_registration "$repository" "$runner_name" || true
+}
+
 resolve_runner_status() {
   local claim_result="$1" runner_pid="$2" runner_name="$3"
   REPLY=1
@@ -266,14 +287,17 @@ run_one_ephemeral_runner() {
   runner_pid=""
   runner_status=1
 
+  if ! repository_is_private "$repository"; then
+    log "refusing non-private or unavailable repository ${repository}"
+    return 1
+  fi
+
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   "$lima_cli" clone "$base_vm" "$vm_name" \
     --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
 
   cleanup() {
-    log "deleting ${vm_name}"
-    delete_vm "$vm_name"
-    delete_runner_registration "$repository" "$runner_name" || true
+    cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
   trap 'release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
@@ -300,7 +324,7 @@ run_one_ephemeral_runner() {
 }
 
 main() {
-  local repository
+  local repository stale_vms
   umask 077
   mkdir -p "$log_directory"
   if [[ "$slot" != "a" && "$slot" != "b" ]]; then
@@ -331,14 +355,12 @@ main() {
     fi
   done
 
+  stale_vms=$(list_ephemeral_vms) || return 1
   while IFS= read -r stale_vm; do
     [[ "$stale_vm" == trips-linux-runner-${slot}-job-* ]] || continue
     log "removing stale ephemeral VM ${stale_vm}"
     delete_vm "$stale_vm" || return 1
-  done < <(
-    "$lima_cli" list --json 2>/dev/null |
-      /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]'
-  )
+  done <<< "$stale_vms"
 
   while true; do
     acquire_selection_lock

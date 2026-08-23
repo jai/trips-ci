@@ -230,6 +230,25 @@ delete_vm() {
   fi
 }
 
+list_ephemeral_vms() {
+  local inventory vm_name
+  inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || {
+    log "unable to inventory Tart VMs"
+    return 1
+  }
+  while IFS= read -r vm_name; do
+    [[ "$vm_name" == trips-runner-job-* ]] && print -r -- "$vm_name"
+  done <<< "$inventory"
+}
+
+cleanup_runner_vm() {
+  local repository="$1" runner_name="$2" vm_name="$3" work_disk="$4"
+  log "deleting ${vm_name}"
+  delete_vm "$vm_name" || return 1
+  /bin/rm -f "$work_disk" || return 1
+  delete_runner_registration "$repository" "$runner_name" || true
+}
+
 resolve_runner_status() {
   local claim_result="$1" runner_pid="$2" runner_name="$3"
   REPLY=1
@@ -267,6 +286,11 @@ run_one_ephemeral_runner() {
   runner_pid=""
   runner_status=1
 
+  if ! repository_is_private "$repository"; then
+    log "refusing non-private or unavailable repository ${repository}"
+    return 1
+  fi
+
   while true; do
     linux_runner_count=$(
       /opt/homebrew/bin/limactl list --json 2>/dev/null |
@@ -282,10 +306,7 @@ run_one_ephemeral_runner() {
   "$tart_cli" clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
-    log "deleting ${vm_name}"
-    delete_vm "$vm_name" || return 1
-    /bin/rm -f "$work_disk" || return 1
-    delete_runner_registration "$repository" "$runner_name" || true
+    cleanup_runner_vm "$repository" "$runner_name" "$vm_name" "$work_disk"
   }
   trap 'cleanup_vm || exit 1; exit 130' INT TERM
 
@@ -351,7 +372,7 @@ run_one_ephemeral_runner() {
 }
 
 main() {
-  local repository
+  local repository stale_vms
   umask 077
   mkdir -p "$log_directory"
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
@@ -386,12 +407,13 @@ main() {
     return 1
   fi
 
+  stale_vms=$(list_ephemeral_vms) || return 1
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-runner-job-* ]]; then
       log "removing stale ephemeral VM ${stale_vm}"
       delete_vm "$stale_vm" || return 1
     fi
-  done < <("$tart_cli" list --source local --quiet)
+  done <<< "$stale_vms"
   for stale_disk in "${work_disk_directory}"/trips-runner-job-*.raw(N); do
     log "removing stale ephemeral work disk ${stale_disk:t}"
     /bin/rm -f "$stale_disk" || return 1
