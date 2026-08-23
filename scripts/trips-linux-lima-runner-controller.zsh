@@ -5,7 +5,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
-readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-ci,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
+readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
 readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
 readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
@@ -18,6 +18,7 @@ readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
 readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
+readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 
@@ -215,9 +216,46 @@ release_selection_lock() {
 }
 
 delete_vm() {
-  local vm_name="$1"
-  /opt/homebrew/bin/limactl stop --force "$vm_name" >/dev/null 2>&1 || true
-  /opt/homebrew/bin/limactl delete --force "$vm_name" >/dev/null 2>&1 || true
+  local vm_name="$1" inventory
+  "$lima_cli" stop --force "$vm_name" >/dev/null 2>&1 || true
+  "$lima_cli" delete --force "$vm_name" >/dev/null 2>&1 || true
+  inventory=$("$lima_cli" list --json 2>/dev/null) || {
+    log "unable to verify deletion of ${vm_name}"
+    return 1
+  }
+  if printf '%s\n' "$inventory" | /usr/bin/python3 -c 'import json,sys
+name=sys.argv[1]
+raise SystemExit(0 if any(json.loads(line).get("name") == name for line in sys.stdin if line.strip()) else 1)' "$vm_name"; then
+    log "failed to delete ${vm_name}"
+    return 1
+  fi
+}
+
+resolve_runner_status() {
+  local claim_result="$1" runner_pid="$2" runner_name="$3"
+  REPLY=1
+  case "$claim_result" in
+    0)
+      log "${runner_name} claimed a job"
+      release_selection_lock
+      REPLY=0
+      wait "$runner_pid" || REPLY=$?
+      ;;
+    1)
+      REPLY=0
+      wait "$runner_pid" || REPLY=$?
+      ;;
+    2)
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      REPLY=0
+      ;;
+    *)
+      log "unexpected runner claim result ${claim_result}"
+      return 1
+      ;;
+  esac
 }
 
 run_one_ephemeral_runner() {
@@ -229,7 +267,7 @@ run_one_ephemeral_runner() {
   runner_status=1
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
-  /opt/homebrew/bin/limactl clone "$base_vm" "$vm_name" \
+  "$lima_cli" clone "$base_vm" "$vm_name" \
     --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
 
   cleanup() {
@@ -237,42 +275,26 @@ run_one_ephemeral_runner() {
     delete_vm "$vm_name"
     delete_runner_registration "$repository" "$runner_name" || true
   }
-  trap 'release_selection_lock; cleanup; exit 0' INT TERM
+  trap 'release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
-    /opt/homebrew/bin/limactl shell "$vm_name" -- \
+    "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
     registration_token "$repository" || return 1
     token="$REPLY"
     log "registering ${runner_name} for ${repository}"
-    printf '%s\n' "$token" | /opt/homebrew/bin/limactl shell "$vm_name" -- \
+    printf '%s\n' "$token" | "$lima_cli" shell "$vm_name" -- \
       bash -lc "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh" &
     runner_pid=$!
     wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
     local claim_result=$?
-    case "$claim_result" in
-      0)
-        log "${runner_name} claimed a job"
-        release_selection_lock
-        wait "$runner_pid"
-        runner_status=$?
-        ;;
-      1)
-        wait "$runner_pid"
-        runner_status=$?
-        ;;
-      2)
-        log "${runner_name} remained idle; removing it"
-        /bin/kill "$runner_pid" 2>/dev/null || true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-        runner_status=0
-        ;;
-    esac
+    resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || return 1
+    runner_status="$REPLY"
   } always {
     release_selection_lock
     trap - INT TERM
-    cleanup
+    cleanup || return 1
   }
   return "$runner_status"
 }
@@ -293,7 +315,7 @@ main() {
     log "GitHub App private key is missing"
     return 1
   fi
-  if ! /opt/homebrew/bin/limactl list "$base_vm" --json 2>/dev/null |
+  if ! "$lima_cli" list "$base_vm" --json 2>/dev/null |
     /usr/bin/grep -q '"status":"Stopped"'; then
     log "stopped Lima base ${base_vm} is missing"
     return 1
@@ -312,9 +334,9 @@ main() {
   while IFS= read -r stale_vm; do
     [[ "$stale_vm" == trips-linux-runner-${slot}-job-* ]] || continue
     log "removing stale ephemeral VM ${stale_vm}"
-    delete_vm "$stale_vm"
+    delete_vm "$stale_vm" || return 1
   done < <(
-    /opt/homebrew/bin/limactl list --json 2>/dev/null |
+    "$lima_cli" list --json 2>/dev/null |
       /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]'
   )
 

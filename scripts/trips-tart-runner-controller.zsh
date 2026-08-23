@@ -17,10 +17,11 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
 readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-tart-runner/work-disks}"
-readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-1}"
+readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-20}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
+readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
 readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
 
@@ -216,9 +217,43 @@ next_repository() {
 }
 
 delete_vm() {
-  local vm_name="$1"
-  /opt/homebrew/bin/tart stop "$vm_name" >/dev/null 2>&1 || true
-  /opt/homebrew/bin/tart delete "$vm_name" >/dev/null 2>&1 || true
+  local vm_name="$1" inventory
+  "$tart_cli" stop "$vm_name" >/dev/null 2>&1 || true
+  "$tart_cli" delete "$vm_name" >/dev/null 2>&1 || true
+  inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || {
+    log "unable to verify deletion of ${vm_name}"
+    return 1
+  }
+  if printf '%s\n' "$inventory" | /usr/bin/grep -qx "$vm_name"; then
+    log "failed to delete ${vm_name}"
+    return 1
+  fi
+}
+
+resolve_runner_status() {
+  local claim_result="$1" runner_pid="$2" runner_name="$3"
+  REPLY=1
+  case "$claim_result" in
+    0)
+      log "${runner_name} claimed a job"
+      REPLY=0
+      wait "$runner_pid" || REPLY=$?
+      ;;
+    1)
+      REPLY=0
+      wait "$runner_pid" || REPLY=$?
+      ;;
+    2)
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      REPLY=0
+      ;;
+    *)
+      log "unexpected runner claim result ${claim_result}"
+      return 1
+      ;;
+  esac
 }
 
 run_one_ephemeral_runner() {
@@ -244,25 +279,25 @@ run_one_ephemeral_runner() {
   done
 
   log "cloning ${base_vm} to ${vm_name}"
-  /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
+  "$tart_cli" clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
     log "deleting ${vm_name}"
-    delete_vm "$vm_name"
-    /bin/rm -f "$work_disk"
+    delete_vm "$vm_name" || return 1
+    /bin/rm -f "$work_disk" || return 1
     delete_runner_registration "$repository" "$runner_name" || true
   }
-  trap 'cleanup_vm; exit 0' INT TERM
+  trap 'cleanup_vm || exit 1; exit 130' INT TERM
 
   {
-    /opt/homebrew/bin/tart set "$vm_name" --random-mac --random-serial || return 1
+    "$tart_cli" set "$vm_name" --random-mac --random-serial || return 1
     /usr/sbin/mkfile -n 60g "$work_disk" || return 1
 
     log "starting ${vm_name}"
-    /opt/homebrew/bin/tart run --no-graphics --no-audio --no-clipboard \
+    "$tart_cli" run --no-graphics --no-audio --no-clipboard --net-softnet \
       --disk="${work_disk}:sync=none" "$vm_name" >"$vm_log" 2>&1 &
     vm_pid=$!
-    vm_ip=$(/opt/homebrew/bin/tart ip "$vm_name" --wait 180) || return 1
+    vm_ip=$("$tart_cli" ip "$vm_name" --wait 180) || return 1
     ssh_ready=false
     for _ in {1..60}; do
       if /usr/bin/ssh \
@@ -305,26 +340,11 @@ run_one_ephemeral_runner() {
     runner_pid=$!
     wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
     local claim_result=$?
-    case "$claim_result" in
-      0)
-        log "${runner_name} claimed a job"
-        wait "$runner_pid"
-        runner_status=$?
-        ;;
-      1)
-        wait "$runner_pid"
-        runner_status=$?
-        ;;
-      2)
-        log "${runner_name} remained idle; removing it"
-        /bin/kill "$runner_pid" 2>/dev/null || true
-        wait "$runner_pid" >/dev/null 2>&1 || true
-        runner_status=0
-        ;;
-    esac
+    resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || return 1
+    runner_status="$REPLY"
   } always {
     trap - INT TERM
-    cleanup_vm
+    cleanup_vm || return 1
     [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
   }
   return "$runner_status"
@@ -353,7 +373,7 @@ main() {
       return 1
     fi
   done
-  if ! /opt/homebrew/bin/tart list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
+  if ! "$tart_cli" list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
     log "base VM ${base_vm} is missing"
     return 1
   fi
@@ -361,7 +381,7 @@ main() {
     log "resource contract requires 4 CPUs and 16384 MB for iOS"
     return 1
   fi
-  if ! /opt/homebrew/bin/tart set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
+  if ! "$tart_cli" set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
     log "failed to apply the iOS base resource contract"
     return 1
   fi
@@ -369,12 +389,12 @@ main() {
   while IFS= read -r stale_vm; do
     if [[ "$stale_vm" == trips-runner-job-* ]]; then
       log "removing stale ephemeral VM ${stale_vm}"
-      delete_vm "$stale_vm"
+      delete_vm "$stale_vm" || return 1
     fi
-  done < <(/opt/homebrew/bin/tart list --source local --quiet)
+  done < <("$tart_cli" list --source local --quiet)
   for stale_disk in "${work_disk_directory}"/trips-runner-job-*.raw(N); do
     log "removing stale ephemeral work disk ${stale_disk:t}"
-    /bin/rm -f "$stale_disk"
+    /bin/rm -f "$stale_disk" || return 1
   done
 
   while true; do

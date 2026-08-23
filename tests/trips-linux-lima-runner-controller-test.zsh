@@ -24,13 +24,51 @@ fi
 SCRIPT
 chmod 700 "$fake_gh"
 
+fake_curl="${test_directory}/curl"
+cat > "$fake_curl" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+request="$*"
+if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
+  /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
+elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
+  print -r -- '{"runners":[{"id":4242,"name":"page-two-runner","busy":true}]}'
+else
+  print -u2 -- "Unexpected curl request: ${request}"
+  exit 1
+fi
+SCRIPT
+chmod 700 "$fake_curl"
+
+fake_lima="${test_directory}/limactl"
+cat > "$fake_lima" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+if [[ "$1" == list && "${FAKE_VM_INVENTORY_ERROR:-false}" == true ]]; then
+  exit 42
+fi
+if [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
+  print -r -- '{"name":"test-vm","status":"Stopped"}'
+  exit 0
+fi
+if [[ "$1" == list ]]; then
+  exit 0
+fi
+exit 0
+SCRIPT
+chmod 700 "$fake_lima"
+
 export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_LINUX_LIMA_SLOT=a
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
+export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"
+export TRIPS_LINUX_LIMA_CLI="$fake_lima"
 export TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate'
 export TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS=1
 export TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS=0.1
 source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+installation_token_value=test-token
+installation_token_expires_at=4102444800
 
 assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
@@ -45,6 +83,14 @@ if next_repository >/dev/null; then
   print -u2 -- 'Expected an incompatible Linux label to be rejected'
   exit 1
 fi
+
+if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
+  print -u2 -- 'Expected the public trips-ci repository to stay off private self-hosted runners'
+  exit 1
+fi
+
+runner_lookup 'jai/tonegate' 'page-two-runner'
+assert_equal $'4242\tbusy' "$REPLY"
 
 ( sleep 3 ) &
 fake_runner_pid=$!
@@ -74,5 +120,23 @@ else
   assert_equal 1 "$?"
 fi
 wait "$fake_runner_pid" 2>/dev/null || true
+
+( exit 23 ) &
+fake_runner_pid=$!
+resolve_runner_status 1 "$fake_runner_pid" 'test-runner'
+assert_equal 23 "$REPLY"
+
+export FAKE_VM_PRESENT=true
+if delete_vm 'test-vm'; then
+  print -u2 -- 'Expected Lima deletion to fail closed while the VM remains present'
+  exit 1
+fi
+export FAKE_VM_PRESENT=false
+delete_vm 'test-vm'
+export FAKE_VM_INVENTORY_ERROR=true
+if delete_vm 'test-vm'; then
+  print -u2 -- 'Expected Lima deletion to fail closed when inventory verification fails'
+  exit 1
+fi
 
 print -r -- 'Linux Lima controller selection and claim lifecycle passed.'
