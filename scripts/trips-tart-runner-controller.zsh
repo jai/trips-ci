@@ -23,8 +23,6 @@ readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-mkdir -p "$log_directory"
-
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
@@ -246,6 +244,7 @@ run_one_ephemeral_runner() {
 main() {
   local repository
   umask 077
+  mkdir -p "$log_directory"
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
     return 1
