@@ -25,7 +25,6 @@ typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
-mkdir -p "$log_directory"
 
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -286,6 +285,7 @@ run_one_ephemeral_runner() {
 main() {
   local repository
   umask 077
+  mkdir -p "$log_directory"
   if [[ "$slot" != "a" && "$slot" != "b" ]]; then
     log "TRIPS_LINUX_LIMA_SLOT must be a or b"
     return 1
