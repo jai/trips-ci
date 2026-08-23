@@ -12,10 +12,17 @@ readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
 readonly memory_gib="${TRIPS_LINUX_LIMA_MEMORY_GIB:-8}"
 readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
-readonly runner_labels="jai-ci"
+readonly runner_labels="jai-ci,jai-ci-tonegate"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
 readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
+readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
+readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
+readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
+readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
+
+typeset -g installation_token_value=""
+typeset -g installation_token_expires_at=0
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 mkdir -p "$log_directory"
@@ -45,31 +52,40 @@ github_jwt() {
 }
 
 installation_token() {
-  local jwt
+  local now jwt
+  now=$(/bin/date +%s)
+  if [[ -n "$installation_token_value" ]] && (( now < installation_token_expires_at )); then
+    REPLY="$installation_token_value"
+    return 0
+  fi
   jwt=$(github_jwt) || return 1
-  /usr/bin/curl -fsS -X POST \
+  installation_token_value=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
     -H "Authorization: Bearer $jwt" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" |
-    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || return 1
+  installation_token_expires_at=$((now + 480))
+  REPLY="$installation_token_value"
 }
 
 registration_token() {
   local repository="$1" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS -X POST \
+  installation_token || return 1
+  token="$REPLY"
+  REPLY=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
-    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || return 1
 }
 
 repository_is_private() {
   local repository="$1" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -77,34 +93,40 @@ repository_is_private() {
     /usr/bin/python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("private") is True else 1)'
 }
 
-runner_id() {
-  local repository="$1" runner_name="$2" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
-    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; print(next((str(r["id"]) for r in json.load(sys.stdin)["runners"] if r["name"] == name), ""))' "$runner_name"
+runner_lookup() {
+  local repository="$1" runner_name="$2" token page response result count
+  installation_token || return 1
+  token="$REPLY"
+  page=1
+  while true; do
+    response=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+      -H "Authorization: Bearer $token" -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "https://api.github.com/repos/${repository}/actions/runners?per_page=100&page=${page}") || return 1
+    result=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
+data=json.load(sys.stdin); name=sys.argv[1]; runner=next((r for r in data.get("runners",[]) if r.get("name") == name), None)
+print((str(runner["id"])+"\t"+("busy" if runner.get("busy") else "idle")) if runner else "")' "$runner_name") || return 1
+    if [[ -n "$result" ]]; then REPLY="$result"; return 0; fi
+    count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runners",[])))') || return 1
+    (( count < 100 )) && break
+    page=$((page + 1))
+  done
+  REPLY=$'\tmissing'
 }
 
-runner_is_busy() {
-  local repository="$1" runner_name="$2" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
-    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; raise SystemExit(0 if any(r["name"] == name and r["busy"] for r in json.load(sys.stdin)["runners"]) else 1)' "$runner_name"
+runner_busy_state() {
+  runner_lookup "$1" "$2" || return 1
+  REPLY="${REPLY#*$'\t'}"
 }
 
 delete_runner_registration() {
   local repository="$1" runner_name="$2" id token
-  id=$(runner_id "$repository" "$runner_name") || return 0
+  runner_lookup "$repository" "$runner_name" || return 0
+  id="${REPLY%%$'\t'*}"
   [[ -n "$id" ]] || return 0
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS -X DELETE \
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X DELETE \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -117,19 +139,20 @@ repository_has_queued_job() {
     while IFS=$'\t' read -r run_id head_repository; do
       [[ -n "$run_id" ]] || continue
       [[ "$head_repository" == "$repository" ]] || continue
-      if /opt/homebrew/bin/gh api \
+      if "$gh_cli" api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
+        --paginate --slurp \
         "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
         /usr/bin/python3 -c 'import json,sys
-required={"self-hosted","linux","arm64","jai-ci"}
-jobs=json.load(sys.stdin).get("jobs",[])
-print(sum(1 for job in jobs if job.get("status") == "queued" and {str(label).lower() for label in job.get("labels",[])} == required))' |
+base={"self-hosted","linux","arm64"}; supported=({"jai-ci"},{"jai-ci-tonegate"})
+jobs=[job for page in json.load(sys.stdin) for job in page.get("jobs",[])]
+print(sum(1 for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])}))' |
         /usr/bin/grep -qxv '0'; then
         return 0
       fi
     done < <(
-      /opt/homebrew/bin/gh api \
+      "$gh_cli" api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
         --paginate \
@@ -147,6 +170,26 @@ next_repository() {
       printf '%s' "$repository"
       return 0
     fi
+  done
+  return 1
+}
+
+wait_for_runner_claim() {
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state
+  started_at=$(/bin/date +%s)
+  while /bin/kill -0 "$runner_pid" 2>/dev/null; do
+    if runner_busy_state "$repository" "$runner_name"; then
+      state="$REPLY"
+      [[ "$state" == busy ]] && return 0
+    else
+      state=unknown
+      log "unable to verify ${runner_name} claim state; preserving runner"
+    fi
+    now=$(/bin/date +%s)
+    if (( now - started_at >= claim_timeout_seconds )) && [[ "$state" == idle || "$state" == missing ]]; then
+      return 2
+    fi
+    /bin/sleep "$claim_poll_seconds"
   done
   return 1
 }
@@ -185,15 +228,16 @@ run_one_ephemeral_runner() {
   runner_name="${runner_name_prefix}-${suffix}"
   runner_pid=""
   runner_status=1
+  runner_claimed=false
 
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   /opt/homebrew/bin/limactl clone "$base_vm" "$vm_name" \
     --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
 
   cleanup() {
-    delete_runner_registration "$repository" "$runner_name" || true
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
+    delete_runner_registration "$repository" "$runner_name" || true
   }
   trap 'release_selection_lock; cleanup; exit 0' INT TERM
 
@@ -201,29 +245,31 @@ run_one_ephemeral_runner() {
     /opt/homebrew/bin/limactl shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
-    token=$(registration_token "$repository") || return 1
+    registration_token "$repository" || return 1
+    token="$REPLY"
     log "registering ${runner_name} for ${repository}"
     printf '%s\n' "$token" | /opt/homebrew/bin/limactl shell "$vm_name" -- \
       bash -lc "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh" &
     runner_pid=$!
-    runner_claimed=false
-    for _ in {1..150}; do
-      if ! /bin/kill -0 "$runner_pid" 2>/dev/null; then
-        wait "$runner_pid"
-        runner_status=$?
-        break
-      fi
-      if runner_is_busy "$repository" "$runner_name"; then
+    wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
+    local claim_result=$?
+    case "$claim_result" in
+      0)
         runner_claimed=true
         log "${runner_name} claimed a job"
         release_selection_lock
         wait "$runner_pid"
         runner_status=$?
-        break
-      fi
-      /bin/sleep 2
-    done
-    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" 2>/dev/null; then
+        ;;
+      1)
+        wait "$runner_pid"
+        runner_status=$?
+        ;;
+      2)
+        runner_claimed=false
+        ;;
+    esac
+    if [[ "$runner_claimed" == false ]]; then
       log "${runner_name} remained idle; removing it"
       /bin/kill "$runner_pid" 2>/dev/null || true
       wait "$runner_pid" >/dev/null 2>&1 || true
@@ -257,7 +303,7 @@ main() {
     log "stopped Lima base ${base_vm} is missing"
     return 1
   fi
-  if ! /opt/homebrew/bin/gh auth status >/dev/null 2>&1; then
+  if ! "$gh_cli" auth status >/dev/null 2>&1; then
     log "GitHub CLI authentication is unavailable"
     return 1
   fi
@@ -295,4 +341,6 @@ main() {
   done
 }
 
-main
+if [[ "${TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY:-false}" != true ]]; then
+  main
+fi

@@ -20,6 +20,12 @@ readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.loca
 readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-1}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
+readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
+readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
+readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
+
+typeset -g installation_token_value=""
+typeset -g installation_token_expires_at=0
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -48,63 +54,81 @@ github_jwt() {
 }
 
 registration_token() {
-  local repository="$1" jwt installation_token
-  jwt=$(github_jwt) || return 1
-  installation_token=$(
-    /usr/bin/curl -fsS -X POST \
-      -H "Authorization: Bearer $jwt" \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "https://api.github.com/app/installations/${installation_id}/access_tokens" |
-      /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
-  ) || return 1
-  /usr/bin/curl -fsS -X POST \
-    -H "Authorization: Bearer $installation_token" \
+  local repository="$1" token
+  installation_token || return 1
+  token="$REPLY"
+  REPLY=$(
+    "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
+    -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+  ) || return 1
 }
 
 installation_token() {
-  local jwt
+  local now jwt
+  now=$(/bin/date +%s)
+  if [[ -n "$installation_token_value" ]] && (( now < installation_token_expires_at )); then
+    REPLY="$installation_token_value"
+    return 0
+  fi
   jwt=$(github_jwt) || return 1
-  /usr/bin/curl -fsS -X POST \
+  installation_token_value=$(
+    "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
     -H "Authorization: Bearer $jwt" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" |
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+  ) || return 1
+  installation_token_expires_at=$((now + 480))
+  REPLY="$installation_token_value"
 }
 
-runner_id() {
-  local repository="$1" runner_name="$2" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
-    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; print(next((str(r["id"]) for r in json.load(sys.stdin)["runners"] if r["name"] == name), ""))' "$runner_name"
+runner_lookup() {
+  local repository="$1" runner_name="$2" token page response result count
+  installation_token || return 1
+  token="$REPLY"
+  page=1
+  while true; do
+    response=$(
+      "$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+        -H "Authorization: Bearer $token" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${repository}/actions/runners?per_page=100&page=${page}"
+    ) || return 1
+    result=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
+data=json.load(sys.stdin); name=sys.argv[1]
+runner=next((r for r in data.get("runners",[]) if r.get("name") == name), None)
+print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle")) if runner else "")' "$runner_name") || return 1
+    if [[ -n "$result" ]]; then
+      REPLY="$result"
+      return 0
+    fi
+    count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runners",[])))') || return 1
+    (( count < 100 )) && break
+    page=$((page + 1))
+  done
+  REPLY=$'\tmissing'
 }
 
-runner_is_busy() {
-  local repository="$1" runner_name="$2" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
-    -H "Authorization: Bearer $token" \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
-    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; raise SystemExit(0 if any(r["name"] == name and r["busy"] for r in json.load(sys.stdin)["runners"]) else 1)' "$runner_name"
+runner_busy_state() {
+  local repository="$1" runner_name="$2"
+  runner_lookup "$repository" "$runner_name" || return 1
+  REPLY="${REPLY#*$'\t'}"
 }
 
 delete_runner_registration() {
   local repository="$1" runner_name="$2" id token
-  id=$(runner_id "$repository" "$runner_name") || return 0
+  runner_lookup "$repository" "$runner_name" || return 0
+  id="${REPLY%%$'\t'*}"
   [[ -n "$id" ]] || return 0
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS -X DELETE \
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X DELETE \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -113,8 +137,9 @@ delete_runner_registration() {
 
 repository_is_private() {
   local repository="$1" token
-  token=$(installation_token) || return 1
-  /usr/bin/curl -fsS \
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
     -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -131,12 +156,14 @@ repository_has_queued_job() {
       if "$gh_cli" api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
+        --paginate --slurp \
         "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
         /usr/bin/python3 -c 'import json,sys
 host=sys.argv[1].lower()
 required={"self-hosted","macos","arm64","tart","ios"}
 allowed=required|{host}
-jobs=json.load(sys.stdin).get("jobs",[])
+pages=json.load(sys.stdin)
+jobs=[job for page in pages for job in page.get("jobs",[])]
 print(sum(1 for job in jobs if job.get("status") == "queued" and required <= {str(label).lower() for label in job.get("labels",[])} <= allowed))' "$runner_host_label" |
         /usr/bin/grep -qxv '0'; then
         return 0
@@ -149,6 +176,30 @@ print(sum(1 for job in jobs if job.get("status") == "queued" and required <= {st
         "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
         --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
     )
+  done
+  return 1
+}
+
+wait_for_runner_claim() {
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state
+  started_at=$(/bin/date +%s)
+  while /bin/kill -0 "$runner_pid" 2>/dev/null; do
+    if runner_busy_state "$repository" "$runner_name"; then
+      state="$REPLY"
+      if [[ "$state" == busy ]]; then
+        return 0
+      fi
+    else
+      state=unknown
+      log "unable to verify ${runner_name} claim state; preserving runner"
+    fi
+    now=$(/bin/date +%s)
+    if (( now - started_at >= claim_timeout_seconds )); then
+      if [[ "$state" == idle || "$state" == missing ]]; then
+        return 2
+      fi
+    fi
+    /bin/sleep "$claim_poll_seconds"
   done
   return 1
 }
@@ -180,6 +231,7 @@ run_one_ephemeral_runner() {
   vm_pid=""
   runner_pid=""
   runner_status=1
+  runner_claimed=false
 
   while true; do
     linux_runner_count=$(
@@ -196,10 +248,10 @@ run_one_ephemeral_runner() {
   /opt/homebrew/bin/tart clone "$base_vm" "$vm_name" || return 1
 
   cleanup_vm() {
-    delete_runner_registration "$repository" "$runner_name" || true
     log "deleting ${vm_name}"
     delete_vm "$vm_name"
     /bin/rm -f "$work_disk"
+    delete_runner_registration "$repository" "$runner_name" || true
   }
   trap 'cleanup_vm; exit 0' INT TERM
 
@@ -238,7 +290,8 @@ run_one_ephemeral_runner() {
       "admin@${vm_ip}" \
       "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || return 1
 
-    token=$(registration_token "$repository") || return 1
+    registration_token "$repository" || return 1
+    token="$REPLY"
     log "registering ${runner_name} for ${repository}"
     printf '%s\n' "$token" | /usr/bin/ssh \
       -o BatchMode=yes \
@@ -251,23 +304,24 @@ run_one_ephemeral_runner() {
       "admin@${vm_ip}" \
       "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
     runner_pid=$!
-    runner_claimed=false
-    for _ in {1..150}; do
-      if ! /bin/kill -0 "$runner_pid" 2>/dev/null; then
-        wait "$runner_pid"
-        runner_status=$?
-        break
-      fi
-      if runner_is_busy "$repository" "$runner_name"; then
+    wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
+    local claim_result=$?
+    case "$claim_result" in
+      0)
         runner_claimed=true
         log "${runner_name} claimed a job"
         wait "$runner_pid"
         runner_status=$?
-        break
-      fi
-      /bin/sleep 2
-    done
-    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" 2>/dev/null; then
+        ;;
+      1)
+        wait "$runner_pid"
+        runner_status=$?
+        ;;
+      2)
+        runner_claimed=false
+        ;;
+    esac
+    if [[ "$runner_claimed" == false ]]; then
       log "${runner_name} remained idle; removing it"
       /bin/kill "$runner_pid" 2>/dev/null || true
       wait "$runner_pid" >/dev/null 2>&1 || true
