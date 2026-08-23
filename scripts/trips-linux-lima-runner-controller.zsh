@@ -5,7 +5,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
-readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
+readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-ci,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
 readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
 readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
@@ -120,8 +120,11 @@ repository_has_queued_job() {
       if /opt/homebrew/bin/gh api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
+        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+        /usr/bin/python3 -c 'import json,sys
+required={"self-hosted","linux","arm64","jai-ci"}
+jobs=json.load(sys.stdin).get("jobs",[])
+print(sum(1 for job in jobs if job.get("status") == "queued" and {str(label).lower() for label in job.get("labels",[])} == required))' |
         /usr/bin/grep -qxv '0'; then
         return 0
       fi
@@ -129,7 +132,8 @@ repository_has_queued_job() {
       /opt/homebrew/bin/gh api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
+        --paginate \
+        "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
         --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
     )
   done

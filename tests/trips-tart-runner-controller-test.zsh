@@ -17,18 +17,21 @@ case "${FAKE_SCENARIO:-}" in
     if [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]]; then
       print -r -- $'101\tjai/tonegate'
     elif [[ "$request" == *'repos/jai/tonegate/actions/runs/101/jobs?'* ]]; then
-      print -r -- '1'
+      print -r -- '{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
     fi
     ;;
   trips-first)
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
       print -r -- $'202\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      if [[ "$request" == *'index("borg-cube-03")'* ]]; then
-        print -u2 -- 'Queued-job detection must not require a controller-specific host label'
-        exit 1
-      fi
-      print -r -- '1'
+      print -r -- '{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}'
+    fi
+    ;;
+  incompatible-host)
+    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
+      print -r -- $'303\tjai/trips-frontend'
+    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/303/jobs?'* ]]; then
+      print -r -- '{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios","another-host"]}]}'
     fi
     ;;
   no-jobs)
@@ -61,6 +64,11 @@ assert_equal 'jai/trips-frontend' "$(next_repository)"
 export FAKE_SCENARIO=no-jobs
 if next_repository >/dev/null; then
   print -u2 -- 'Expected no queued repository'
+  exit 1
+fi
+export FAKE_SCENARIO=incompatible-host
+if next_repository >/dev/null; then
+  print -u2 -- 'Expected a job with an incompatible host label to be rejected'
   exit 1
 fi
 

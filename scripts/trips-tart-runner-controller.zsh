@@ -88,6 +88,17 @@ runner_id() {
     /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; print(next((str(r["id"]) for r in json.load(sys.stdin)["runners"] if r["name"] == name), ""))' "$runner_name"
 }
 
+runner_is_busy() {
+  local repository="$1" runner_name="$2" token
+  token=$(installation_token) || return 1
+  /usr/bin/curl -fsS \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners?per_page=100" |
+    /usr/bin/python3 -c 'import json,sys; name=sys.argv[1]; raise SystemExit(0 if any(r["name"] == name and r["busy"] for r in json.load(sys.stdin)["runners"]) else 1)' "$runner_name"
+}
+
 delete_runner_registration() {
   local repository="$1" runner_name="$2" id token
   id=$(runner_id "$repository" "$runner_name") || return 0
@@ -120,8 +131,13 @@ repository_has_queued_job() {
       if "$gh_cli" api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("macOS")) and (.labels | index("ARM64")) and (.labels | index("tart")) and (.labels | index("ios")))] | length' |
+        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+        /usr/bin/python3 -c 'import json,sys
+host=sys.argv[1].lower()
+required={"self-hosted","macos","arm64","tart","ios"}
+allowed=required|{host}
+jobs=json.load(sys.stdin).get("jobs",[])
+print(sum(1 for job in jobs if job.get("status") == "queued" and required <= {str(label).lower() for label in job.get("labels",[])} <= allowed))' "$runner_host_label" |
         /usr/bin/grep -qxv '0'; then
         return 0
       fi
@@ -129,7 +145,8 @@ repository_has_queued_job() {
       "$gh_cli" api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
+        --paginate \
+        "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
         --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
     )
   done
@@ -154,13 +171,14 @@ delete_vm() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_status work_disk ssh_ready linux_runner_count
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status runner_claimed work_disk ssh_ready linux_runner_count
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   vm_log="${log_directory}/${vm_name}.log"
   work_disk="${work_disk_directory}/${vm_name}.raw"
   vm_pid=""
+  runner_pid=""
   runner_status=1
 
   while true; do
@@ -231,8 +249,30 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; ./run.sh"
-    runner_status=$?
+      "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
+    runner_pid=$!
+    runner_claimed=false
+    for _ in {1..150}; do
+      if ! /bin/kill -0 "$runner_pid" 2>/dev/null; then
+        wait "$runner_pid"
+        runner_status=$?
+        break
+      fi
+      if runner_is_busy "$repository" "$runner_name"; then
+        runner_claimed=true
+        log "${runner_name} claimed a job"
+        wait "$runner_pid"
+        runner_status=$?
+        break
+      fi
+      /bin/sleep 2
+    done
+    if [[ "$runner_claimed" == false ]] && /bin/kill -0 "$runner_pid" 2>/dev/null; then
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      runner_status=0
+    fi
   } always {
     trap - INT TERM
     cleanup_vm

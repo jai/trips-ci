@@ -23,7 +23,7 @@ actionlint_args=(
   -ignore 'label "jai-ci" is unknown'
 )
 
-actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
+actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml "$repo_root"/.github/workflows/*.yml
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
