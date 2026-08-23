@@ -121,6 +121,12 @@ jobs:
               - 🎯 If `main` is **>= ${{ inputs.coverage_floor }}%**: PR coverage must be **>= ${{ inputs.coverage_floor }}%**
           YAML
 
+      - name: Add writable tool directory
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Run octocov (coverage reporting/enforcement)
         uses: k1LoW/octocov-action@v1
         env:
