@@ -85,4 +85,20 @@ workflow_run_oldest_queued_job_timestamp() {
 [[ "$(repository_oldest_queued_job_timestamp jai/trips-frontend)" == 2026-08-24T18:00:01Z ]]
 [[ -z "$(repository_oldest_queued_job_timestamp jai/trips-ci || true)" ]]
 
+repository_workflow_runs() {
+  return 2
+}
+if repository_oldest_queued_job_timestamp jai/trips-api; then
+  print -u2 -r -- "expected repository lookup to preserve API failure"
+  exit 1
+else
+  [[ $? -eq 2 ]]
+fi
+if next_repository; then
+  print -u2 -r -- "expected scheduler to preserve API failure"
+  exit 1
+else
+  [[ $? -eq 2 ]]
+fi
+
 print -r -- "linux runner scheduling tests passed"

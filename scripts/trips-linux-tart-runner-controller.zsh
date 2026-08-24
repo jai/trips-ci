@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -u
+set -o pipefail
 
 PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -72,7 +73,7 @@ repository_workflow_runs() {
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
       "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
-      --jq '.workflow_runs[] | [.id, .created_at] | @tsv'
+      --jq '.workflow_runs[] | [.id, .created_at] | @tsv' || return 2
   done
 }
 
@@ -82,31 +83,39 @@ workflow_run_oldest_queued_job_timestamp() {
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
-    /usr/bin/jq -r '[.[].jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci"))) | .created_at] | min // empty'
+    /usr/bin/jq -r '[.[].jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci"))) | .created_at] | min // empty' || return 2
 }
 
 repository_oldest_queued_job_timestamp() {
-  local repository="$1" run_id run_created_at queued_at oldest_queued_at
+  local repository="$1" runs run_id run_created_at queued_at oldest_queued_at
   oldest_queued_at=""
+  runs=$(repository_workflow_runs "$repository") || return 2
   while IFS=$'\t' read -r run_id run_created_at; do
     [[ -n "$run_id" ]] || continue
-    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || continue
+    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
     [[ -n "$queued_at" ]] || continue
     if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
       oldest_queued_at="$queued_at"
     fi
-  done < <(repository_workflow_runs "$repository")
+  done <<< "$runs"
   [[ -n "$oldest_queued_at" ]] || return 1
   print -r -- "$oldest_queued_at"
 }
 
 next_repository() {
   local repository queued_at oldest_queued_at
+  local -i lookup_status
   selected_repository=""
   oldest_queued_at=""
 
   for repository in "${repository_list[@]}"; do
-    queued_at=$(repository_oldest_queued_job_timestamp "$repository") || continue
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then
+      :
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) && continue
+      return "$lookup_status"
+    fi
     if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
       selected_repository="$repository"
       oldest_queued_at="$queued_at"
@@ -254,6 +263,7 @@ run_one_ephemeral_runner() {
 
 main() {
   local repository
+  local -i scan_status
   umask 077
   mkdir -p "$log_directory"
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
@@ -298,7 +308,13 @@ main() {
         /bin/sleep 15
       fi
     else
-      /bin/sleep "$idle_scan_interval_seconds"
+      scan_status=$?
+      if (( scan_status == 1 )); then
+        /bin/sleep "$idle_scan_interval_seconds"
+      else
+        log "GitHub queue scan failed; retrying in 15 seconds"
+        /bin/sleep 15
+      fi
     fi
   done
 }
