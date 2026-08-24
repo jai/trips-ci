@@ -6,6 +6,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repositories="${TRIPS_LINUX_TART_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-ci,jai/trips-fastlane,jai/openclaw-prompts}"
+readonly -a repository_list=(${(s:,:)repositories})
 readonly base_vm="${TRIPS_LINUX_TART_BASE_VM:-trips-linux-runner-base}"
 readonly base_memory_mb="${TRIPS_LINUX_TART_BASE_MEMORY_MB:-4096}"
 readonly runner_root="/opt/actions-runner"
@@ -18,7 +19,8 @@ readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-mkdir -p "$log_directory"
+typeset -gi next_repository_index=1
+typeset -g selected_repository=""
 
 timestamp() {
   /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -89,9 +91,17 @@ repository_has_queued_job() {
 
 next_repository() {
   local repository
-  for repository in ${(s:,:)repositories}; do
+  local -i repository_count offset candidate_index
+  repository_count=${#repository_list}
+  selected_repository=""
+  (( repository_count > 0 )) || return 1
+
+  for (( offset = 0; offset < repository_count; offset++ )); do
+    candidate_index=$(( ((next_repository_index - 1 + offset) % repository_count) + 1 ))
+    repository="${repository_list[$candidate_index]}"
     if repository_has_queued_job "$repository"; then
-      printf '%s' "$repository"
+      selected_repository="$repository"
+      next_repository_index=$(( (candidate_index % repository_count) + 1 ))
       return 0
     fi
   done
@@ -238,6 +248,7 @@ run_one_ephemeral_runner() {
 main() {
   local repository
   umask 077
+  mkdir -p "$log_directory"
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
     return 1
@@ -271,7 +282,8 @@ main() {
   done < <(/opt/homebrew/bin/tart list --source local --quiet)
 
   while true; do
-    if repository=$(next_repository); then
+    if next_repository; then
+      repository="$selected_repository"
       if run_one_ephemeral_runner "$repository"; then
         log "ephemeral runner completed a job for ${repository}"
       else
@@ -284,4 +296,6 @@ main() {
   done
 }
 
-main
+if [[ "${TRIPS_LINUX_TART_CONTROLLER_SOURCE_ONLY:-0}" != "1" ]]; then
+  main
+fi
