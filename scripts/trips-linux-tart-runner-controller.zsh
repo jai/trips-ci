@@ -16,6 +16,7 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
+readonly idle_scan_interval_seconds="${TRIPS_LINUX_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -64,32 +65,39 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
-repository_oldest_queued_job_timestamp() {
-  local repository="$1" run_status run_id created_at oldest_created_at
-  oldest_created_at=""
+repository_workflow_runs() {
+  local repository="$1" run_status
   for run_status in queued in_progress; do
-    while IFS=$'\t' read -r run_id created_at; do
-      [[ -n "$run_id" ]] || continue
-      if /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
-        /usr/bin/grep -qxv '0'; then
-        if [[ -z "$oldest_created_at" || "$created_at" < "$oldest_created_at" ]]; then
-          oldest_created_at="$created_at"
-        fi
-      fi
-    done < <(
-      /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[] | [.id, .created_at] | @tsv'
-    )
+    /opt/homebrew/bin/gh api --paginate \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+      --jq '.workflow_runs[] | [.id, .created_at] | @tsv'
   done
-  [[ -n "$oldest_created_at" ]] || return 1
-  print -r -- "$oldest_created_at"
+}
+
+workflow_run_oldest_queued_job_timestamp() {
+  local repository="$1" run_id="$2"
+  /opt/homebrew/bin/gh api --paginate --slurp \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+    /usr/bin/jq -r '[.[].jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci"))) | .created_at] | min // empty'
+}
+
+repository_oldest_queued_job_timestamp() {
+  local repository="$1" run_id run_created_at queued_at oldest_queued_at
+  oldest_queued_at=""
+  while IFS=$'\t' read -r run_id run_created_at; do
+    [[ -n "$run_id" ]] || continue
+    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || continue
+    [[ -n "$queued_at" ]] || continue
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      oldest_queued_at="$queued_at"
+    fi
+  done < <(repository_workflow_runs "$repository")
+  [[ -n "$oldest_queued_at" ]] || return 1
+  print -r -- "$oldest_queued_at"
 }
 
 next_repository() {
@@ -290,7 +298,7 @@ main() {
         /bin/sleep 15
       fi
     else
-      /bin/sleep 5
+      /bin/sleep "$idle_scan_interval_seconds"
     fi
   done
 }

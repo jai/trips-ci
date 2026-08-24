@@ -9,6 +9,7 @@ source "${0:A:h}/trips-linux-tart-runner-controller.zsh"
 typeset -g api_queued_at=""
 typeset -g frontend_queued_at=""
 typeset -g ci_queued_at=""
+typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
 
 repository_oldest_queued_job_timestamp() {
   local candidate="$1"
@@ -54,5 +55,34 @@ if next_repository; then
   exit 1
 fi
 [[ -z "$selected_repository" ]]
+
+functions[repository_oldest_queued_job_timestamp]="$production_repository_oldest_queued_job_timestamp"
+
+repository_workflow_runs() {
+  local candidate="$1"
+  case "$candidate" in
+    jai/trips-api)
+      print -r -- $'api-new\t2026-08-24T19:00:00Z'
+      print -r -- $'api-old\t2026-08-23T18:00:00Z'
+      ;;
+    jai/trips-frontend)
+      print -r -- $'frontend-run\t2026-08-24T18:00:00Z'
+      ;;
+  esac
+}
+
+workflow_run_oldest_queued_job_timestamp() {
+  local candidate="$1" run_id="$2"
+  case "${candidate}:${run_id}" in
+    jai/trips-api:api-new) print -r -- 2026-08-24T19:00:01Z ;;
+    jai/trips-api:api-old) print -r -- 2026-08-24T20:00:00Z ;;
+    jai/trips-frontend:frontend-run) print -r -- 2026-08-24T18:00:01Z ;;
+    *) return 1 ;;
+  esac
+}
+
+[[ "$(repository_oldest_queued_job_timestamp jai/trips-api)" == 2026-08-24T19:00:01Z ]]
+[[ "$(repository_oldest_queued_job_timestamp jai/trips-frontend)" == 2026-08-24T18:00:01Z ]]
+[[ -z "$(repository_oldest_queued_job_timestamp jai/trips-ci || true)" ]]
 
 print -r -- "linux runner scheduling tests passed"
