@@ -265,7 +265,7 @@ jobs:
 
             ## Runner Liveness (MANDATORY)
             - This review job owns the repository's only Linux runner while it executes. Other Linux checks cannot start until you exit.
-            - Never run `gh pr checks --watch`, `gh run watch`, a polling loop, or any command that waits for sibling workflows or jobs.
+            - Never run \`gh pr checks --watch\`, \`gh run watch\`, a polling loop, or any command that waits for sibling workflows or jobs.
             - You may inspect check state once for diagnostic context. Pending sibling checks are not a review blocker and must not delay your decision.
             - Review and verify the exact diff with commands that can complete inside this job, emit the structured decision marker, and exit promptly so queued checks can run.
 
