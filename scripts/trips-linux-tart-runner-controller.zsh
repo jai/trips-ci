@@ -19,7 +19,6 @@ readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-typeset -gi next_repository_index=1
 typeset -g selected_repository=""
 
 timestamp() {
@@ -65,10 +64,11 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
-repository_has_queued_job() {
-  local repository="$1" run_status run_id
+repository_oldest_queued_job_timestamp() {
+  local repository="$1" run_status run_id created_at oldest_created_at
+  oldest_created_at=""
   for run_status in queued in_progress; do
-    while IFS= read -r run_id; do
+    while IFS=$'\t' read -r run_id created_at; do
       [[ -n "$run_id" ]] || continue
       if /opt/homebrew/bin/gh api \
         -H 'Accept: application/vnd.github+json' \
@@ -76,36 +76,35 @@ repository_has_queued_job() {
         "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
         --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
         /usr/bin/grep -qxv '0'; then
-        return 0
+        if [[ -z "$oldest_created_at" || "$created_at" < "$oldest_created_at" ]]; then
+          oldest_created_at="$created_at"
+        fi
       fi
     done < <(
       /opt/homebrew/bin/gh api \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
         "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[].id'
+        --jq '.workflow_runs[] | [.id, .created_at] | @tsv'
     )
   done
-  return 1
+  [[ -n "$oldest_created_at" ]] || return 1
+  print -r -- "$oldest_created_at"
 }
 
 next_repository() {
-  local repository
-  local -i repository_count offset candidate_index
-  repository_count=${#repository_list}
+  local repository queued_at oldest_queued_at
   selected_repository=""
-  (( repository_count > 0 )) || return 1
+  oldest_queued_at=""
 
-  for (( offset = 0; offset < repository_count; offset++ )); do
-    candidate_index=$(( ((next_repository_index - 1 + offset) % repository_count) + 1 ))
-    repository="${repository_list[$candidate_index]}"
-    if repository_has_queued_job "$repository"; then
+  for repository in "${repository_list[@]}"; do
+    queued_at=$(repository_oldest_queued_job_timestamp "$repository") || continue
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
       selected_repository="$repository"
-      next_repository_index=$(( (candidate_index % repository_count) + 1 ))
-      return 0
+      oldest_queued_at="$queued_at"
     fi
   done
-  return 1
+  [[ -n "$selected_repository" ]]
 }
 
 delete_vm() {

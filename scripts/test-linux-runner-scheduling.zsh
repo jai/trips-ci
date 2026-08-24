@@ -6,36 +6,49 @@ export TRIPS_LINUX_TART_REPOSITORIES="jai/trips-api,jai/trips-frontend,jai/trips
 
 source "${0:A:h}/trips-linux-tart-runner-controller.zsh"
 
-typeset -ga queued_repositories
+typeset -g api_queued_at=""
+typeset -g frontend_queued_at=""
+typeset -g ci_queued_at=""
 
-repository_has_queued_job() {
+repository_oldest_queued_job_timestamp() {
   local candidate="$1"
-  (( ${queued_repositories[(Ie)$candidate]} > 0 ))
+  case "$candidate" in
+    jai/trips-api) [[ -n "$api_queued_at" ]] && print -r -- "$api_queued_at" ;;
+    jai/trips-frontend) [[ -n "$frontend_queued_at" ]] && print -r -- "$frontend_queued_at" ;;
+    jai/trips-ci) [[ -n "$ci_queued_at" ]] && print -r -- "$ci_queued_at" ;;
+    *) return 1 ;;
+  esac
 }
 
 assert_selected() {
   local expected="$1"
-  next_repository
+  if ! next_repository; then
+    print -u2 -r -- "expected ${expected}, selected no repository"
+    return 1
+  fi
   if [[ "$selected_repository" != "$expected" ]]; then
     print -u2 -r -- "expected ${expected}, selected ${selected_repository}"
     return 1
   fi
 }
 
-queued_repositories=(jai/trips-api jai/trips-frontend)
-assert_selected jai/trips-api
-assert_selected jai/trips-frontend
-assert_selected jai/trips-api
-
-queued_repositories=(jai/trips-frontend)
+api_queued_at=2026-08-24T19:00:00Z
+frontend_queued_at=2026-08-24T18:00:00Z
+ci_queued_at=""
 assert_selected jai/trips-frontend
 
-queued_repositories=(jai/trips-api jai/trips-frontend jai/trips-ci)
-assert_selected jai/trips-ci
-assert_selected jai/trips-api
+api_queued_at=""
+frontend_queued_at=2026-08-24T18:00:00Z
 assert_selected jai/trips-frontend
 
-queued_repositories=()
+api_queued_at=2026-08-24T18:00:00Z
+frontend_queued_at=2026-08-24T18:00:00Z
+ci_queued_at=2026-08-24T18:00:00Z
+assert_selected jai/trips-api
+
+api_queued_at=""
+frontend_queued_at=""
+ci_queued_at=""
 if next_repository; then
   print -u2 -r -- "expected no repository, selected ${selected_repository}"
   exit 1
