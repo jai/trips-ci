@@ -16,10 +16,10 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-tart-runner"
 readonly required_volume="${TRIPS_LINUX_TART_REQUIRED_VOLUME:-}"
+readonly idle_scan_interval_seconds="${TRIPS_LINUX_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
-typeset -gi next_repository_index=1
 typeset -g selected_repository=""
 
 timestamp() {
@@ -31,22 +31,25 @@ log() {
 }
 
 base64url() {
+  setopt local_options pipe_fail
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
 }
 
 github_jwt() {
+  setopt local_options pipe_fail
   local now issued_at expires_at header payload unsigned signature
   now=$(/bin/date +%s)
   issued_at=$((now - 60))
   expires_at=$((now + 540))
-  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)
-  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url)
+  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url) || return 1
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url) || return 1
   unsigned="${header}.${payload}"
-  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url)
+  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url) || return 1
   printf '%s.%s' "$unsigned" "$signature"
 }
 
 registration_token() {
+  setopt local_options pipe_fail
   local repository="$1" jwt installation_token
   jwt=$(github_jwt) || return 1
   installation_token=$(
@@ -65,47 +68,63 @@ registration_token() {
     /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
 }
 
-repository_has_queued_job() {
-  local repository="$1" run_status run_id
+repository_workflow_runs() {
+  local repository="$1" run_status
   for run_status in queued in_progress; do
-    while IFS= read -r run_id; do
-      [[ -n "$run_id" ]] || continue
-      if /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" \
-        --jq '[.jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci")))] | length' |
-        /usr/bin/grep -qxv '0'; then
-        return 0
-      fi
-    done < <(
-      /opt/homebrew/bin/gh api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=20" \
-        --jq '.workflow_runs[].id'
-    )
+    /opt/homebrew/bin/gh api --paginate \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+      --jq '.workflow_runs[] | [.id, .created_at] | @tsv' || return 2
   done
-  return 1
+}
+
+workflow_run_oldest_queued_job_timestamp() {
+  setopt local_options pipe_fail
+  local repository="$1" run_id="$2"
+  /opt/homebrew/bin/gh api --paginate --slurp \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+    /usr/bin/jq -r '[.[].jobs[] | select(.status == "queued") | select((.labels | index("self-hosted")) and (.labels | index("linux")) and (.labels | index("arm64")) and (.labels | index("jai-ci"))) | .created_at] | min // empty' || return 2
+}
+
+repository_oldest_queued_job_timestamp() {
+  local repository="$1" runs run_id run_created_at queued_at oldest_queued_at
+  oldest_queued_at=""
+  runs=$(repository_workflow_runs "$repository") || return 2
+  while IFS=$'\t' read -r run_id run_created_at; do
+    [[ -n "$run_id" ]] || continue
+    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
+    [[ -n "$queued_at" ]] || continue
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      oldest_queued_at="$queued_at"
+    fi
+  done <<< "$runs"
+  [[ -n "$oldest_queued_at" ]] || return 1
+  print -r -- "$oldest_queued_at"
 }
 
 next_repository() {
-  local repository
-  local -i repository_count offset candidate_index
-  repository_count=${#repository_list}
+  local repository queued_at oldest_queued_at
+  local -i lookup_status
   selected_repository=""
-  (( repository_count > 0 )) || return 1
+  oldest_queued_at=""
 
-  for (( offset = 0; offset < repository_count; offset++ )); do
-    candidate_index=$(( ((next_repository_index - 1 + offset) % repository_count) + 1 ))
-    repository="${repository_list[$candidate_index]}"
-    if repository_has_queued_job "$repository"; then
+  for repository in "${repository_list[@]}"; do
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then
+      :
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) && continue
+      return "$lookup_status"
+    fi
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
       selected_repository="$repository"
-      next_repository_index=$(( (candidate_index % repository_count) + 1 ))
-      return 0
+      oldest_queued_at="$queued_at"
     fi
   done
-  return 1
+  [[ -n "$selected_repository" ]]
 }
 
 delete_vm() {
@@ -124,6 +143,7 @@ runner_id() {
 }
 
 runner_is_busy() {
+  setopt local_options pipe_fail
   local repository="$1" runner_name="$2"
   /opt/homebrew/bin/gh api \
     -H 'Accept: application/vnd.github+json' \
@@ -247,6 +267,7 @@ run_one_ephemeral_runner() {
 
 main() {
   local repository
+  local -i scan_status
   umask 077
   mkdir -p "$log_directory"
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
@@ -291,7 +312,13 @@ main() {
         /bin/sleep 15
       fi
     else
-      /bin/sleep 5
+      scan_status=$?
+      if (( scan_status == 1 )); then
+        /bin/sleep "$idle_scan_interval_seconds"
+      else
+        log "GitHub queue scan failed; retrying in 15 seconds"
+        /bin/sleep 15
+      fi
     fi
   done
 }
