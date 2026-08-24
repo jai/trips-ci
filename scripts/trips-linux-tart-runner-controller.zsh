@@ -41,10 +41,10 @@ github_jwt() {
   now=$(/bin/date +%s)
   issued_at=$((now - 60))
   expires_at=$((now + 540))
-  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)
-  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url)
+  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url) || return 1
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url) || return 1
   unsigned="${header}.${payload}"
-  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url)
+  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url) || return 1
   printf '%s.%s' "$unsigned" "$signature"
 }
 

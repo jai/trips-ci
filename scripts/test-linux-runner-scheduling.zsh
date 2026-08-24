@@ -15,6 +15,15 @@ if [[ -o pipefail ]]; then
   print -u2 -r -- "pipeline helpers must restore the caller's pipefail setting"
   exit 1
 fi
+typeset production_base64url="${functions[base64url]}"
+base64url() {
+  return 7
+}
+if github_jwt >/dev/null 2>&1; then
+  print -u2 -r -- "JWT generation must preserve encoding failures"
+  exit 1
+fi
+functions[base64url]="$production_base64url"
 
 typeset -g api_queued_at=""
 typeset -g frontend_queued_at=""
