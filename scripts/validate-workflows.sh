@@ -27,6 +27,8 @@ actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
+zsh -n "$repo_root/scripts/trips-linux-tart-runner-controller.zsh"
+"$repo_root/scripts/test-linux-runner-scheduling.zsh"
 
 if rg -n 'Claude PR Assistant|@claude|CLAUDE_' \
   "$repo_root/.github/workflows" \
