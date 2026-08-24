@@ -6,6 +6,16 @@ export TRIPS_LINUX_TART_REPOSITORIES="jai/trips-api,jai/trips-frontend,jai/trips
 
 source "${0:A:h}/trips-linux-tart-runner-controller.zsh"
 
+if [[ -o pipefail ]]; then
+  print -u2 -r -- "controller source must not enable pipefail globally"
+  exit 1
+fi
+printf '%s' probe | base64url >/dev/null
+if [[ -o pipefail ]]; then
+  print -u2 -r -- "pipeline helpers must restore the caller's pipefail setting"
+  exit 1
+fi
+
 typeset -g api_queued_at=""
 typeset -g frontend_queued_at=""
 typeset -g ci_queued_at=""

@@ -1,6 +1,5 @@
 #!/bin/zsh
 set -u
-set -o pipefail
 
 PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -32,10 +31,12 @@ log() {
 }
 
 base64url() {
+  setopt local_options pipe_fail
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
 }
 
 github_jwt() {
+  setopt local_options pipe_fail
   local now issued_at expires_at header payload unsigned signature
   now=$(/bin/date +%s)
   issued_at=$((now - 60))
@@ -48,6 +49,7 @@ github_jwt() {
 }
 
 registration_token() {
+  setopt local_options pipe_fail
   local repository="$1" jwt installation_token
   jwt=$(github_jwt) || return 1
   installation_token=$(
@@ -78,6 +80,7 @@ repository_workflow_runs() {
 }
 
 workflow_run_oldest_queued_job_timestamp() {
+  setopt local_options pipe_fail
   local repository="$1" run_id="$2"
   /opt/homebrew/bin/gh api --paginate --slurp \
     -H 'Accept: application/vnd.github+json' \
@@ -140,6 +143,7 @@ runner_id() {
 }
 
 runner_is_busy() {
+  setopt local_options pipe_fail
   local repository="$1" runner_name="$2"
   /opt/homebrew/bin/gh api \
     -H 'Accept: application/vnd.github+json' \
