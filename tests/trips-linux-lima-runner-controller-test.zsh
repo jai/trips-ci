@@ -304,6 +304,105 @@ if /bin/kill -0 "$timeout_python_pid" 2>/dev/null ||
   exit 1
 fi
 
+blocked_signals=$(run_with_timeout 2 /usr/bin/python3 -c \
+  'import signal; print(" ".join(sorted(item.name for item in signal.pthread_sigmask(signal.SIG_BLOCK, []))))')
+assert_equal '' "$blocked_signals"
+for signal_spec in HUP:129 INT:130 QUIT:131 TERM:143; do
+  signal_name="${signal_spec%%:*}"
+  expected_status="${signal_spec#*:}"
+  if run_with_timeout 2 /usr/bin/python3 -c \
+    'import os, signal, sys; os.kill(os.getpid(), getattr(signal, "SIG" + sys.argv[1])); raise SystemExit(99)' \
+    "$signal_name" >/dev/null 2>&1; then
+    print -u2 -- "Expected ${signal_name} to terminate the wrapped command"
+    exit 1
+  else
+    assert_equal "$expected_status" "$?"
+  fi
+done
+
+timeout_prelaunch_started="${test_directory}/timeout-prelaunch-started"
+timeout_prelaunch_release="${test_directory}/timeout-prelaunch-release"
+timeout_prelaunch_target_started="${test_directory}/timeout-prelaunch-target-started"
+timeout_prelaunch_target="${test_directory}/timeout-prelaunch-target"
+cat > "$timeout_prelaunch_target" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+print -r -- started > "${FAKE_TIMEOUT_PRELAUNCH_TARGET_STARTED:?}"
+SCRIPT
+chmod 700 "$timeout_prelaunch_target"
+timeout_prelaunch_parent="${test_directory}/timeout-prelaunch-parent"
+cat > "$timeout_prelaunch_parent" <<SCRIPT
+#!/bin/zsh
+set -u
+export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
+export TRIPS_LINUX_LIMA_SLOT=a
+export TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_READY_FILE='${timeout_prelaunch_started}'
+export TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_RELEASE_FILE='${timeout_prelaunch_release}'
+source '${repo_root}/scripts/trips-linux-lima-runner-controller.zsh'
+run_with_timeout 30 '${timeout_prelaunch_target}'
+SCRIPT
+chmod 700 "$timeout_prelaunch_parent"
+export FAKE_TIMEOUT_PRELAUNCH_TARGET_STARTED="$timeout_prelaunch_target_started"
+"$timeout_prelaunch_parent" &
+timeout_prelaunch_parent_pid=$!
+for _ in {1..100}; do
+  [[ -s "$timeout_prelaunch_started" ]] && break
+  /bin/sleep 0.02
+done
+if [[ ! -s "$timeout_prelaunch_started" ]]; then
+  print -u2 -- 'Expected delayed timeout helper to reach its pre-launch handshake'
+  exit 1
+fi
+timeout_prelaunch_python_pid=$(/usr/bin/pgrep -P "$timeout_prelaunch_parent_pid" | /usr/bin/head -n 1)
+if [[ -z "$timeout_prelaunch_python_pid" ]]; then
+  print -u2 -- 'Expected timeout helper to remain alive during the child pre-exec window'
+  exit 1
+fi
+timeout_prelaunch_child_pid=$(/usr/bin/pgrep -P "$timeout_prelaunch_python_pid" | /usr/bin/head -n 1)
+if [[ -z "$timeout_prelaunch_child_pid" ]]; then
+  print -u2 -- 'Expected wrapped child to wait at the pre-exec release barrier'
+  exit 1
+fi
+/bin/kill -STOP "$timeout_prelaunch_python_pid"
+for _ in {1..100}; do
+  timeout_prelaunch_python_state=$(/bin/ps -o state= -p "$timeout_prelaunch_python_pid" | /usr/bin/tr -d ' ')
+  [[ "$timeout_prelaunch_python_state" == T* ]] && break
+  /bin/sleep 0.02
+done
+if [[ "${timeout_prelaunch_python_state:-}" != T* ]]; then
+  /bin/kill -CONT "$timeout_prelaunch_python_pid" 2>/dev/null || true
+  print -u2 -- 'Expected timeout helper to stop before the pre-launch parent-death assertion'
+  exit 1
+fi
+/bin/kill -KILL "$timeout_prelaunch_parent_pid"
+print -r -- released > "$timeout_prelaunch_release"
+for _ in {1..100}; do
+  timeout_prelaunch_child_state=$(/bin/ps -o state= -p "$timeout_prelaunch_child_pid" 2>/dev/null | /usr/bin/tr -d ' ' || true)
+  [[ -z "$timeout_prelaunch_child_state" || "$timeout_prelaunch_child_state" == Z* ]] && break
+  /bin/sleep 0.02
+done
+if [[ -n "${timeout_prelaunch_child_state:-}" && "$timeout_prelaunch_child_state" != Z* ]]; then
+  /bin/kill -CONT "$timeout_prelaunch_python_pid" 2>/dev/null || true
+  print -u2 -- 'Expected wrapped child to finish after crossing the pre-exec release barrier'
+  exit 1
+fi
+timeout_prelaunch_target_was_started=false
+[[ -e "$timeout_prelaunch_target_started" ]] && timeout_prelaunch_target_was_started=true
+/bin/kill -CONT "$timeout_prelaunch_python_pid"
+if [[ "$timeout_prelaunch_target_was_started" == true ]]; then
+  print -u2 -- 'Expected the timeout target to remain unlaunched while its stopped helper cannot reap it'
+  exit 1
+fi
+for _ in {1..100}; do
+  ! /bin/kill -0 "$timeout_prelaunch_python_pid" 2>/dev/null && break
+  /bin/sleep 0.02
+done
+if /bin/kill -0 "$timeout_prelaunch_python_pid" 2>/dev/null; then
+  print -u2 -- 'Expected delayed timeout helper to exit after its parent died'
+  exit 1
+fi
+wait "$timeout_prelaunch_parent_pid" 2>/dev/null || true
+
 fake_provision_bin="${test_directory}/provision-bin"
 mkdir -p "$fake_provision_bin"
 fake_provision_log="${test_directory}/provision-order.log"
