@@ -323,11 +323,20 @@ package_manager_sleep() {
 }
 
 run_with_timeout() {
-  local timeout_seconds="$1" timeout_pid timeout_status
+  local timeout_seconds="$1" timeout_pid timeout_status expected_parent_pid
   shift
-  "$timeout_python" -c 'import os, signal, subprocess, sys
-timeout = float(sys.argv[1])
-process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+  zmodload zsh/system || return 1
+  expected_parent_pid="$sysparams[pid]"
+  "$timeout_python" -c 'import os, signal, subprocess, sys, time
+expected_parent = int(sys.argv[1])
+timeout = float(sys.argv[2])
+handled_signals = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+if os.getppid() != expected_parent:
+    raise SystemExit(130)
+signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
+if os.getppid() != expected_parent:
+    raise SystemExit(130)
+process = subprocess.Popen(sys.argv[3:], start_new_session=True)
 def stop(signum, _frame):
     if process.poll() is None:
         try:
@@ -336,18 +345,27 @@ def stop(signum, _frame):
             pass
         process.wait()
     raise SystemExit(128 + signum)
-for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+for handled_signal in handled_signals:
     signal.signal(handled_signal, stop)
-try:
-    status = process.wait(timeout)
-except subprocess.TimeoutExpired:
+signal.pthread_sigmask(signal.SIG_UNBLOCK, handled_signals)
+deadline = time.monotonic() + timeout
+while True:
+    if os.getppid() != expected_parent:
+        stop(signal.SIGTERM, None)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        raise SystemExit(124)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+        status = process.wait(min(remaining, 0.05))
+        break
+    except subprocess.TimeoutExpired:
         pass
-    process.wait()
-    raise SystemExit(124)
-raise SystemExit(status if status >= 0 else 128 + (-status))' "$timeout_seconds" "$@" &
+raise SystemExit(status if status >= 0 else 128 + (-status))' "$expected_parent_pid" "$timeout_seconds" "$@" &
   timeout_pid=$!
   active_timeout_pid="$timeout_pid"
   timeout_status=0

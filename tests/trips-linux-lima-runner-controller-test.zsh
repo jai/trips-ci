@@ -263,6 +263,47 @@ if /bin/kill -0 "$timeout_command_pid" 2>/dev/null || /bin/kill -0 "$timeout_chi
   exit 1
 fi
 
+timeout_parent_death="${test_directory}/timeout-parent-death"
+cat > "$timeout_parent_death" <<SCRIPT
+#!/bin/zsh
+set -u
+export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
+export TRIPS_LINUX_LIMA_SLOT=a
+source '${repo_root}/scripts/trips-linux-lima-runner-controller.zsh'
+run_with_timeout 30 '${timeout_command}'
+SCRIPT
+chmod 700 "$timeout_parent_death"
+rm -f "$FAKE_TIMEOUT_COMMAND_PID_FILE" "$FAKE_TIMEOUT_CHILD_PID_FILE"
+"$timeout_parent_death" &
+timeout_parent_pid=$!
+for _ in {1..100}; do
+  timeout_python_pid=$(/usr/bin/pgrep -P "$timeout_parent_pid" 2>/dev/null | /usr/bin/head -n 1 || true)
+  [[ -n "$timeout_python_pid" && -s "$FAKE_TIMEOUT_COMMAND_PID_FILE" && -s "$FAKE_TIMEOUT_CHILD_PID_FILE" ]] && break
+  /bin/sleep 0.02
+done
+if [[ -z "${timeout_python_pid:-}" ]]; then
+  print -u2 -- 'Expected timeout helper to start before parent-death test'
+  exit 1
+fi
+timeout_command_pid=$(cat "$FAKE_TIMEOUT_COMMAND_PID_FILE")
+timeout_child_pid=$(cat "$FAKE_TIMEOUT_CHILD_PID_FILE")
+/bin/kill -KILL "$timeout_parent_pid"
+wait "$timeout_parent_pid" 2>/dev/null || true
+for _ in {1..100}; do
+  if ! /bin/kill -0 "$timeout_python_pid" 2>/dev/null &&
+    ! /bin/kill -0 "$timeout_command_pid" 2>/dev/null &&
+    ! /bin/kill -0 "$timeout_child_pid" 2>/dev/null; then
+    break
+  fi
+  /bin/sleep 0.02
+done
+if /bin/kill -0 "$timeout_python_pid" 2>/dev/null ||
+  /bin/kill -0 "$timeout_command_pid" 2>/dev/null ||
+  /bin/kill -0 "$timeout_child_pid" 2>/dev/null; then
+  print -u2 -- 'Expected parent-death guard to reap the timeout process group'
+  exit 1
+fi
+
 fake_provision_bin="${test_directory}/provision-bin"
 mkdir -p "$fake_provision_bin"
 fake_provision_log="${test_directory}/provision-order.log"
