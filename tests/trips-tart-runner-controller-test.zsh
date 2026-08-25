@@ -69,6 +69,9 @@ fake_tart="${test_directory}/tart"
 cat > "$fake_tart" <<'SCRIPT'
 #!/bin/zsh
 set -eu
+if [[ -n "${FAKE_TART_RUN_LOG:-}" ]]; then
+  print -r -- "$*" >> "$FAKE_TART_RUN_LOG"
+fi
 if [[ "$1" == list && "${FAKE_VM_INVENTORY_ERROR:-false}" == true ]]; then
   exit 42
 fi
@@ -223,6 +226,42 @@ if delete_vm 'test-vm'; then
 fi
 if list_ephemeral_vms >/dev/null; then
   print -u2 -- 'Expected Tart startup inventory failure to propagate'
+  exit 1
+fi
+export FAKE_VM_INVENTORY_ERROR=false
+
+export FAKE_TART_RUN_LOG="${test_directory}/tart-run.log"
+assert_configured_network_invocation() {
+  local configured_mode="$1" vm_name="$2" expected_invocation="$3"
+  local work_disk="${test_directory}/${vm_name}.raw" vm_log="${test_directory}/${vm_name}.log"
+  : > "$FAKE_TART_RUN_LOG"
+  if [[ "$configured_mode" == unset ]]; then
+    env -u TRIPS_TART_NETWORK_MODE \
+      TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+      TRIPS_TART_CLI="$fake_tart" \
+      FAKE_TART_RUN_LOG="$FAKE_TART_RUN_LOG" \
+      zsh -uc 'source "$1"; start_tart_vm "$2" "$3" "$4"; tart_pid="$REPLY"; wait "$tart_pid"' \
+      _ "${repo_root}/scripts/trips-tart-runner-controller.zsh" "$vm_name" "$work_disk" "$vm_log"
+  else
+    TRIPS_TART_NETWORK_MODE="$configured_mode" \
+      TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+      TRIPS_TART_CLI="$fake_tart" \
+      FAKE_TART_RUN_LOG="$FAKE_TART_RUN_LOG" \
+      zsh -uc 'source "$1"; start_tart_vm "$2" "$3" "$4"; tart_pid="$REPLY"; wait "$tart_pid"' \
+      _ "${repo_root}/scripts/trips-tart-runner-controller.zsh" "$vm_name" "$work_disk" "$vm_log"
+  fi
+  assert_equal "$expected_invocation" "$(tail -n 1 "$FAKE_TART_RUN_LOG")"
+}
+
+assert_configured_network_invocation unset default-vm \
+  'run --no-graphics --no-audio --no-clipboard --net-softnet --disk='"${test_directory}/default-vm.raw"':sync=none default-vm'
+assert_configured_network_invocation shared shared-vm \
+  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/shared-vm.raw"':sync=none shared-vm'
+assert_configured_network_invocation softnet softnet-vm \
+  'run --no-graphics --no-audio --no-clipboard --net-softnet --disk='"${test_directory}/softnet-vm.raw"':sync=none softnet-vm'
+
+if start_tart_vm 'invalid-vm' "${test_directory}/invalid.raw" "${test_directory}/invalid.log" unsupported; then
+  print -u2 -- 'Expected an unsupported Tart network mode to fail closed'
   exit 1
 fi
 
