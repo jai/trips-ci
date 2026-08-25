@@ -44,6 +44,26 @@ fake_lima="${test_directory}/limactl"
 cat > "$fake_lima" <<'SCRIPT'
 #!/bin/zsh
 set -eu
+if [[ "$*" == *'test -x /usr/bin/fuser'* ]]; then
+  [[ "${FAKE_PACKAGE_FUSER_EXISTS:-true}" == true ]] || exit 1
+  [[ "${FAKE_PACKAGE_SUDO_PREFLIGHT_OK:-true}" == true ]] || exit 1
+  exit 0
+fi
+if [[ "$*" == *'sudo -n bash -c '*'/usr/bin/fuser '* ]]; then
+  if [[ -n "${FAKE_PACKAGE_PROBE_SUDO_STATUS:-}" ]]; then
+    exit "$FAKE_PACKAGE_PROBE_SUDO_STATUS"
+  fi
+  if [[ -n "${FAKE_PACKAGE_LOCK_PROBE_STATUS:-}" ]]; then
+    print -r -- "$FAKE_PACKAGE_LOCK_PROBE_STATUS"
+    exit 0
+  fi
+  attempts_file="${FAKE_PACKAGE_LOCK_ATTEMPTS_FILE:?}"
+  attempts=$(cat "$attempts_file")
+  attempts=$((attempts + 1))
+  print -r -- "$attempts" > "$attempts_file"
+  (( attempts > ${FAKE_PACKAGE_LOCK_BUSY_ATTEMPTS:-0} )) && print -r -- 1 || print -r -- 0
+  exit 0
+fi
 if [[ "$1" == list && "${FAKE_VM_INVENTORY_ERROR:-false}" == true ]]; then
   exit 42
 fi
@@ -58,14 +78,30 @@ exit 0
 SCRIPT
 chmod 700 "$fake_lima"
 
+fake_timeout="${test_directory}/gtimeout"
+cat > "$fake_timeout" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+if [[ "${FAKE_PACKAGE_LOCK_PROBE_HANG:-false}" == true && "$*" == *'sudo -n bash -c '*'/usr/bin/fuser '* ]]; then
+  exit 124
+fi
+shift 2
+exec "$@"
+SCRIPT
+chmod 700 "$fake_timeout"
+
 export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_LINUX_LIMA_SLOT=a
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
 export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"
 export TRIPS_LINUX_LIMA_CLI="$fake_lima"
+export TRIPS_LINUX_LIMA_TIMEOUT_CLI="$fake_timeout"
 export TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend'
 export TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS=1
 export TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS=0.1
+export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS=10
+export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS=4
+export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS=3
 source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
@@ -171,6 +207,88 @@ wait "$fake_runner_pid" 2>/dev/null || true
 fake_runner_pid=$!
 resolve_runner_status 1 "$fake_runner_pid" 'test-runner'
 assert_equal 23 "$REPLY"
+
+export FAKE_PACKAGE_LOCK_ATTEMPTS_FILE="${test_directory}/package-lock-attempts"
+typeset production_package_manager_now="${functions[package_manager_now]}"
+typeset production_package_manager_sleep="${functions[package_manager_sleep]}"
+typeset -g fake_package_manager_now=100
+typeset -ga fake_package_manager_sleeps=()
+package_manager_now() {
+  REPLY="$fake_package_manager_now"
+}
+package_manager_sleep() {
+  fake_package_manager_sleeps+=("$1")
+  fake_package_manager_now=$((fake_package_manager_now + $1))
+}
+
+print -r -- 0 > "$FAKE_PACKAGE_LOCK_ATTEMPTS_FILE"
+export FAKE_PACKAGE_LOCK_BUSY_ATTEMPTS=2
+fake_package_manager_now=100
+fake_package_manager_sleeps=()
+wait_for_guest_package_manager 'test-vm'
+assert_equal 3 "$(cat "$FAKE_PACKAGE_LOCK_ATTEMPTS_FILE")"
+
+print -r -- 0 > "$FAKE_PACKAGE_LOCK_ATTEMPTS_FILE"
+export FAKE_PACKAGE_LOCK_BUSY_ATTEMPTS=10000
+fake_package_manager_now=100
+fake_package_manager_sleeps=()
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected package-manager readiness to time out'
+  exit 1
+fi
+
+export FAKE_PACKAGE_LOCK_PROBE_STATUS=42
+fake_package_manager_now=100
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected a package-manager probe failure to fail closed'
+  exit 1
+fi
+unset FAKE_PACKAGE_LOCK_PROBE_STATUS
+
+export FAKE_PACKAGE_FUSER_EXISTS=false
+fake_package_manager_now=100
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected a missing fuser to fail closed'
+  exit 1
+fi
+unset FAKE_PACKAGE_FUSER_EXISTS
+
+export FAKE_PACKAGE_SUDO_PREFLIGHT_OK=false
+fake_package_manager_now=100
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected a sudo preflight failure to fail closed'
+  exit 1
+fi
+unset FAKE_PACKAGE_SUDO_PREFLIGHT_OK
+
+export FAKE_PACKAGE_PROBE_SUDO_STATUS=1
+fake_package_manager_now=100
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected a probe-time sudo failure to fail closed'
+  exit 1
+fi
+unset FAKE_PACKAGE_PROBE_SUDO_STATUS
+
+export FAKE_PACKAGE_LOCK_PROBE_HANG=true
+fake_package_manager_now=100
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected a hung package-manager probe to fail closed'
+  exit 1
+fi
+unset FAKE_PACKAGE_LOCK_PROBE_HANG
+
+print -r -- 0 > "$FAKE_PACKAGE_LOCK_ATTEMPTS_FILE"
+export FAKE_PACKAGE_LOCK_BUSY_ATTEMPTS=10000
+fake_package_manager_now=100
+fake_package_manager_sleeps=()
+if wait_for_guest_package_manager 'test-vm'; then
+  print -u2 -- 'Expected the total package-manager deadline to fail closed'
+  exit 1
+fi
+assert_equal 3 "$(cat "$FAKE_PACKAGE_LOCK_ATTEMPTS_FILE")"
+assert_equal '4 4 2' "${fake_package_manager_sleeps[*]}"
+functions[package_manager_now]="$production_package_manager_now"
+functions[package_manager_sleep]="$production_package_manager_sleep"
 
 export FAKE_VM_PRESENT=true
 if delete_vm 'test-vm'; then

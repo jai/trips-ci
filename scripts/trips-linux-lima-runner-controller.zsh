@@ -20,9 +20,13 @@ readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-sele
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
+readonly timeout_cli="${TRIPS_LINUX_LIMA_TIMEOUT_CLI:-/opt/homebrew/bin/gtimeout}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
+readonly package_manager_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS:-300}"
+readonly package_manager_poll_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS:-2}"
+readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS:-15}"
 
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
@@ -309,6 +313,65 @@ resolve_runner_status() {
   esac
 }
 
+package_manager_now() {
+  REPLY=$(/bin/date +%s)
+}
+
+package_manager_sleep() {
+  /bin/sleep "$1"
+}
+
+wait_for_guest_package_manager() {
+  local vm_name="$1" started_at deadline now remaining probe_timeout probe_output probe_status sleep_seconds
+  if ! "$timeout_cli" --signal=KILL "${package_manager_probe_timeout_seconds}s" \
+    "$lima_cli" shell "$vm_name" -- bash -lc \
+      'test -x /usr/bin/fuser && sudo -n true'; then
+    log "package-manager readiness preflight failed in ${vm_name}"
+    return 1
+  fi
+  package_manager_now
+  started_at="$REPLY"
+  deadline=$((started_at + package_manager_timeout_seconds))
+  while true; do
+    package_manager_now
+    now="$REPLY"
+    remaining=$((deadline - now))
+    if (( remaining <= 0 )); then
+      log "package manager remained busy in ${vm_name} for ${package_manager_timeout_seconds}s"
+      return 1
+    fi
+    probe_timeout="$package_manager_probe_timeout_seconds"
+    (( probe_timeout > remaining )) && probe_timeout="$remaining"
+    if probe_output=$("$timeout_cli" --signal=KILL "${probe_timeout}s" \
+      "$lima_cli" shell "$vm_name" -- bash -lc \
+        'sudo -n bash -c '\''/usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; printf "%s\\n" "$?"'\'''); then
+      probe_status="${probe_output//$'\r'/}"
+    else
+      probe_status=$?
+      log "package-manager readiness command failed in ${vm_name} with status ${probe_status}"
+      return 1
+    fi
+    case "$probe_status" in
+      0) ;;
+      1) return 0 ;;
+      *)
+        log "package-manager readiness probe failed in ${vm_name} with status ${probe_status}"
+        return 1
+        ;;
+    esac
+    package_manager_now
+    now="$REPLY"
+    remaining=$((deadline - now))
+    if (( remaining <= 0 )); then
+      log "package manager remained busy in ${vm_name} for ${package_manager_timeout_seconds}s"
+      return 1
+    fi
+    sleep_seconds="$package_manager_poll_seconds"
+    (( sleep_seconds > remaining )) && sleep_seconds="$remaining"
+    package_manager_sleep "$sleep_seconds"
+  done
+}
+
 run_one_ephemeral_runner() {
   local repository="$1" suffix vm_name token runner_name runner_pid runner_status
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
@@ -334,6 +397,7 @@ run_one_ephemeral_runner() {
   {
     "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
+    wait_for_guest_package_manager "$vm_name" || return 1
 
     registration_token "$repository" || return 1
     token="$REPLY"
