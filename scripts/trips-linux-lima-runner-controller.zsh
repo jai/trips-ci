@@ -26,7 +26,8 @@ readonly timeout_preexec_ready_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_READY_FI
 readonly timeout_preexec_release_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_RELEASE_FILE:-}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
-readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
+readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-120}"
+readonly scan_failure_backoff_seconds="${TRIPS_LINUX_LIMA_SCAN_FAILURE_BACKOFF_SECONDS:-60}"
 readonly package_manager_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS:-300}"
 readonly package_manager_poll_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS:-2}"
 readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS:-15}"
@@ -250,6 +251,26 @@ release_selection_lock() {
   owner="$(/bin/cat "${selection_lock}/pid" 2>/dev/null || true)"
   if [[ "$owner" == "$$" ]]; then
     /bin/rm -rf "$selection_lock"
+  fi
+}
+
+selection_sleep() {
+  /bin/sleep "$1"
+}
+
+handle_no_selected_repository() {
+  local -i scan_status="$1"
+  # Keep the shared lock while idle so the second slot cannot duplicate the
+  # repository scan and exhaust the authenticated GitHub API quota. A failed
+  # scan is different: release the lock before backoff so one throttled lane
+  # cannot prevent the other lane from making progress.
+  if (( scan_status == 1 )); then
+    selection_sleep "$idle_scan_interval_seconds"
+    release_selection_lock
+  else
+    release_selection_lock
+    log "GitHub queue scan failed; retrying in ${scan_failure_backoff_seconds} seconds"
+    selection_sleep "$scan_failure_backoff_seconds"
   fi
 }
 
@@ -603,15 +624,7 @@ main() {
       fi
     else
       scan_status=$?
-      # Keep the shared lock while idle so the second slot cannot duplicate the
-      # repository scan and exhaust the authenticated GitHub API quota.
-      if (( scan_status == 1 )); then
-        /bin/sleep "$idle_scan_interval_seconds"
-      else
-        log "GitHub queue scan failed; retrying in 15 seconds"
-        /bin/sleep 15
-      fi
-      release_selection_lock
+      handle_no_selected_repository "$scan_status"
     fi
   done
 }
