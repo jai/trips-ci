@@ -269,6 +269,7 @@ list_ephemeral_vms() {
   while IFS= read -r vm_name; do
     [[ "$vm_name" == trips-runner-job-* ]] && print -r -- "$vm_name"
   done <<< "$inventory"
+  return 0
 }
 
 cleanup_runner_vm() {

@@ -75,6 +75,9 @@ fi
 if [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
   print -r -- 'test-vm'
 fi
+if [[ "$1" == list && "${FAKE_STALE_VM_PRESENT:-false}" == true ]]; then
+  print -r -- 'trips-runner-job-stale'
+fi
 exit 0
 SCRIPT
 chmod 700 "$fake_tart"
@@ -205,6 +208,14 @@ if cleanup_runner_vm 'jai/trips-frontend' 'test-runner' 'test-vm' "${test_direct
 fi
 export FAKE_VM_PRESENT=false
 delete_vm 'test-vm'
+empty_inventory=$(list_ephemeral_vms) || {
+  print -u2 -- 'Expected an empty Tart inventory to succeed with no stale VMs'
+  exit 1
+}
+assert_equal '' "$empty_inventory"
+export FAKE_STALE_VM_PRESENT=true
+assert_equal 'trips-runner-job-stale' "$(list_ephemeral_vms)"
+export FAKE_STALE_VM_PRESENT=false
 export FAKE_VM_INVENTORY_ERROR=true
 if delete_vm 'test-vm'; then
   print -u2 -- 'Expected Tart deletion to fail closed when inventory verification fails'
