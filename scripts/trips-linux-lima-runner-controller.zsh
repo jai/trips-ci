@@ -31,6 +31,7 @@ readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAG
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 typeset -g selected_repository=""
+typeset -g active_timeout_pid=""
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 
@@ -322,22 +323,49 @@ package_manager_sleep() {
 }
 
 run_with_timeout() {
-  local timeout_seconds="$1"
+  local timeout_seconds="$1" timeout_pid timeout_status
   shift
   "$timeout_python" -c 'import os, signal, subprocess, sys
 timeout = float(sys.argv[1])
 process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+def stop(signum, _frame):
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    raise SystemExit(128 + signum)
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, stop)
 try:
     status = process.wait(timeout)
 except subprocess.TimeoutExpired:
-    os.killpg(process.pid, signal.SIGKILL)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     process.wait()
     raise SystemExit(124)
-raise SystemExit(status if status >= 0 else 128 + (-status))' "$timeout_seconds" "$@"
+raise SystemExit(status if status >= 0 else 128 + (-status))' "$timeout_seconds" "$@" &
+  timeout_pid=$!
+  active_timeout_pid="$timeout_pid"
+  timeout_status=0
+  wait "$timeout_pid" || timeout_status=$?
+  [[ "$active_timeout_pid" == "$timeout_pid" ]] && active_timeout_pid=""
+  return "$timeout_status"
+}
+
+stop_active_timeout() {
+  local timeout_pid="$active_timeout_pid"
+  [[ -n "$timeout_pid" ]] || return 0
+  /bin/kill -TERM "$timeout_pid" 2>/dev/null || true
+  wait "$timeout_pid" 2>/dev/null || true
+  [[ "$active_timeout_pid" == "$timeout_pid" ]] && active_timeout_pid=""
 }
 
 wait_for_guest_package_manager() {
-  local vm_name="$1" started_at deadline now remaining probe_timeout probe_output probe_status sleep_seconds
+  local vm_name="$1" started_at deadline now remaining probe_timeout probe_status sleep_seconds
   package_manager_now
   started_at="$REPLY"
   deadline=$((started_at + package_manager_timeout_seconds))
@@ -357,20 +385,15 @@ wait_for_guest_package_manager() {
     fi
     probe_timeout="$package_manager_probe_timeout_seconds"
     (( probe_timeout > remaining )) && probe_timeout="$remaining"
-    if probe_output=$(run_with_timeout "$probe_timeout" \
+    probe_status=0
+    run_with_timeout "$probe_timeout" \
       "$lima_cli" shell "$vm_name" -- bash -lc \
-        'sudo -n bash -c '\''/usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; printf "%s\\n" "$?"'\'''); then
-      probe_status="${probe_output//$'\r'/}"
-    else
-      probe_status=$?
-      log "package-manager readiness command failed in ${vm_name} with status ${probe_status}"
-      return 1
-    fi
+        'sudo -n bash -c '\''/usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; status=$?; (( status == 1 )) && exit 10; exit "$status"'\''' || probe_status=$?
     case "$probe_status" in
       0) ;;
-      1) return 0 ;;
+      10) return 0 ;;
       *)
-        log "package-manager readiness probe failed in ${vm_name} with status ${probe_status}"
+        log "package-manager readiness command failed in ${vm_name} with status ${probe_status}"
         return 1
         ;;
     esac
@@ -407,12 +430,12 @@ run_one_ephemeral_runner() {
   cleanup() {
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
-  trap 'release_selection_lock; cleanup || exit 1; exit 130' INT TERM
+  trap 'stop_active_timeout; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
+    wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
-    wait_for_guest_package_manager "$vm_name" || return 1
 
     registration_token "$repository" || return 1
     token="$REPLY"
