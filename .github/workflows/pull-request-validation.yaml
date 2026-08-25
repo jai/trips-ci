@@ -21,7 +21,7 @@ permissions:
 jobs:
   validate-pr:
     name: Validate PR
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(github.repository == 'jai/trips-ci' && '["ubuntu-24.04-arm"]' || '["self-hosted","linux","arm64","jai-ci"]') }}
     steps:
       - name: Validate semantic title
         uses: amannn/action-semantic-pull-request@v6

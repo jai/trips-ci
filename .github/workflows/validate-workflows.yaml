@@ -5,21 +5,25 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - "launchd/**"
       - "scripts/**"
       - "templates/**"
+      - "tests/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/**"
+      - "launchd/**"
       - "scripts/**"
       - "templates/**"
+      - "tests/**"
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
