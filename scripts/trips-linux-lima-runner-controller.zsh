@@ -20,13 +20,18 @@ readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-sele
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
+readonly timeout_python="${TRIPS_LINUX_LIMA_TIMEOUT_PYTHON:-/usr/bin/python3}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
+readonly package_manager_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS:-300}"
+readonly package_manager_poll_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS:-2}"
+readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS:-15}"
 
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 typeset -g selected_repository=""
+typeset -g active_timeout_pid=""
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 
@@ -309,6 +314,102 @@ resolve_runner_status() {
   esac
 }
 
+package_manager_now() {
+  REPLY=$(/bin/date +%s)
+}
+
+package_manager_sleep() {
+  /bin/sleep "$1"
+}
+
+run_with_timeout() {
+  local timeout_seconds="$1" timeout_pid timeout_status
+  shift
+  "$timeout_python" -c 'import os, signal, subprocess, sys
+timeout = float(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+def stop(signum, _frame):
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+    raise SystemExit(128 + signum)
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, stop)
+try:
+    status = process.wait(timeout)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+    raise SystemExit(124)
+raise SystemExit(status if status >= 0 else 128 + (-status))' "$timeout_seconds" "$@" &
+  timeout_pid=$!
+  active_timeout_pid="$timeout_pid"
+  timeout_status=0
+  wait "$timeout_pid" || timeout_status=$?
+  [[ "$active_timeout_pid" == "$timeout_pid" ]] && active_timeout_pid=""
+  return "$timeout_status"
+}
+
+stop_active_timeout() {
+  local timeout_pid="$active_timeout_pid"
+  [[ -n "$timeout_pid" ]] || return 0
+  /bin/kill -TERM "$timeout_pid" 2>/dev/null || true
+  wait "$timeout_pid" 2>/dev/null || true
+  [[ "$active_timeout_pid" == "$timeout_pid" ]] && active_timeout_pid=""
+}
+
+wait_for_guest_package_manager() {
+  local vm_name="$1" started_at deadline now remaining probe_timeout probe_status sleep_seconds
+  package_manager_now
+  started_at="$REPLY"
+  deadline=$((started_at + package_manager_timeout_seconds))
+  if ! run_with_timeout "$package_manager_timeout_seconds" \
+    "$lima_cli" shell "$vm_name" -- bash -lc \
+      'test -x /usr/bin/fuser && sudo -n true && sudo -n systemctl stop apt-daily.timer apt-daily-upgrade.timer && sudo -n systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service && sudo -n systemctl mask --runtime apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service'; then
+    log "package-manager readiness preflight failed in ${vm_name}"
+    return 1
+  fi
+  while true; do
+    package_manager_now
+    now="$REPLY"
+    remaining=$((deadline - now))
+    if (( remaining <= 0 )); then
+      log "package manager remained busy in ${vm_name} for ${package_manager_timeout_seconds}s"
+      return 1
+    fi
+    probe_timeout="$package_manager_probe_timeout_seconds"
+    (( probe_timeout > remaining )) && probe_timeout="$remaining"
+    probe_status=0
+    run_with_timeout "$probe_timeout" \
+      "$lima_cli" shell "$vm_name" -- bash -lc \
+        'sudo -n bash -c '\''/usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; status=$?; (( status == 1 )) && exit 10; exit "$status"'\''' || probe_status=$?
+    case "$probe_status" in
+      0) ;;
+      10) return 0 ;;
+      *)
+        log "package-manager readiness command failed in ${vm_name} with status ${probe_status}"
+        return 1
+        ;;
+    esac
+    package_manager_now
+    now="$REPLY"
+    remaining=$((deadline - now))
+    if (( remaining <= 0 )); then
+      log "package manager remained busy in ${vm_name} for ${package_manager_timeout_seconds}s"
+      return 1
+    fi
+    sleep_seconds="$package_manager_poll_seconds"
+    (( sleep_seconds > remaining )) && sleep_seconds="$remaining"
+    package_manager_sleep "$sleep_seconds"
+  done
+}
+
 run_one_ephemeral_runner() {
   local repository="$1" suffix vm_name token runner_name runner_pid runner_status
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
@@ -329,9 +430,10 @@ run_one_ephemeral_runner() {
   cleanup() {
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
-  trap 'release_selection_lock; cleanup || exit 1; exit 130' INT TERM
+  trap 'stop_active_timeout; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
+    wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
