@@ -6,6 +6,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
 readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
+readonly -a repository_list=(${(s:,:)repositories})
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
 readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
 readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
@@ -21,9 +22,11 @@ readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
+readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
 
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
+typeset -g selected_repository=""
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 
@@ -36,22 +39,25 @@ log() {
 }
 
 base64url() {
+  setopt local_options pipe_fail
   /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
 }
 
 github_jwt() {
+  setopt local_options pipe_fail
   local now issued_at expires_at header payload unsigned signature
   now=$(/bin/date +%s)
   issued_at=$((now - 60))
   expires_at=$((now + 540))
-  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)
-  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url)
+  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url) || return 1
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url) || return 1
   unsigned="${header}.${payload}"
-  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url)
+  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url) || return 1
   printf '%s.%s' "$unsigned" "$signature"
 }
 
 installation_token() {
+  setopt local_options pipe_fail
   local now jwt
   now=$(/bin/date +%s)
   if [[ -n "$installation_token_value" ]] && (( now < installation_token_expires_at )); then
@@ -133,45 +139,69 @@ delete_runner_registration() {
     "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
 }
 
-repository_has_queued_job() {
-  local repository="$1" run_status run_id head_repository
+repository_workflow_runs() {
+  local repository="$1" run_status
   for run_status in queued in_progress; do
-    while IFS=$'\t' read -r run_id head_repository; do
-      [[ -n "$run_id" ]] || continue
-      [[ "$head_repository" == "$repository" ]] || continue
-      if "$gh_cli" api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        --paginate --slurp \
-        "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
-        /usr/bin/python3 -c 'import json,sys
+    "$gh_cli" api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      --paginate \
+      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+      --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
+  done
+}
+
+workflow_run_oldest_queued_job_timestamp() {
+  setopt local_options pipe_fail
+  local repository="$1" run_id="$2"
+  "$gh_cli" api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    --paginate --slurp \
+    "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+    /usr/bin/python3 -c 'import json,sys
 base={"self-hosted","linux","arm64"}; supported=({"jai-ci"},{"jai-ci-tonegate"})
 jobs=[job for page in json.load(sys.stdin) for job in page.get("jobs",[])]
-print(sum(1 for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])}))' |
-        /usr/bin/grep -qxv '0'; then
-        return 0
-      fi
-    done < <(
-      "$gh_cli" api \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'X-GitHub-Api-Version: 2022-11-28' \
-        --paginate \
-        "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
-        --jq '.workflow_runs[] | [.id, .head_repository.full_name] | @tsv'
-    )
-  done
-  return 1
+matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])} and job.get("created_at")]
+print(min(matches) if matches else "")' || return 2
+}
+
+repository_oldest_queued_job_timestamp() {
+  local repository="$1" runs run_id run_created_at head_repository queued_at oldest_queued_at
+  oldest_queued_at=""
+  runs=$(repository_workflow_runs "$repository") || return 2
+  while IFS=$'\t' read -r run_id run_created_at head_repository; do
+    [[ -n "$run_id" ]] || continue
+    [[ "$head_repository" == "$repository" ]] || continue
+    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
+    [[ -n "$queued_at" ]] || continue
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      oldest_queued_at="$queued_at"
+    fi
+  done <<< "$runs"
+  [[ -n "$oldest_queued_at" ]] || return 1
+  print -r -- "$oldest_queued_at"
 }
 
 next_repository() {
-  local repository
-  for repository in ${(s:,:)repositories}; do
-    if repository_has_queued_job "$repository"; then
-      printf '%s' "$repository"
-      return 0
+  local repository queued_at oldest_queued_at
+  local -i lookup_status
+  selected_repository=""
+  oldest_queued_at=""
+  for repository in "${repository_list[@]}"; do
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then
+      :
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) && continue
+      return "$lookup_status"
+    fi
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      selected_repository="$repository"
+      oldest_queued_at="$queued_at"
     fi
   done
-  return 1
+  [[ -n "$selected_repository" ]]
 }
 
 wait_for_runner_claim() {
@@ -325,6 +355,7 @@ run_one_ephemeral_runner() {
 
 main() {
   local repository stale_vms
+  local -i scan_status
   umask 077
   mkdir -p "$log_directory"
   if [[ "$slot" != "a" && "$slot" != "b" ]]; then
@@ -364,7 +395,8 @@ main() {
 
   while true; do
     acquire_selection_lock
-    if repository=$(next_repository); then
+    if next_repository; then
+      repository="$selected_repository"
       if run_one_ephemeral_runner "$repository"; then
         log "ephemeral runner completed a job for ${repository}"
       else
@@ -372,9 +404,15 @@ main() {
         /bin/sleep 15
       fi
     else
+      scan_status=$?
       # Keep the shared lock while idle so the second slot cannot duplicate the
       # repository scan and exhaust the authenticated GitHub API quota.
-      /bin/sleep 30
+      if (( scan_status == 1 )); then
+        /bin/sleep "$idle_scan_interval_seconds"
+      else
+        log "GitHub queue scan failed; retrying in 15 seconds"
+        /bin/sleep 15
+      fi
       release_selection_lock
     fi
   done

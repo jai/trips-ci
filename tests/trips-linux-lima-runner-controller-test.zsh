@@ -12,12 +12,12 @@ cat > "$fake_gh" <<'SCRIPT'
 set -eu
 request="$*"
 if [[ "$request" == *'/actions/runs?'* ]]; then
-  print -r -- $'101\tjai/tonegate'
+  print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
 elif [[ "$request" == *'/actions/runs/101/jobs?'* ]]; then
   case "${FAKE_SCENARIO:-}" in
-    standard) print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","linux","ARM64","jai-ci"]}]}]' ;;
-    tonegate) print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","linux","ARM64","jai-ci-tonegate"]}]}]' ;;
-    incompatible) print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","linux","ARM64","another-host"]}]}]' ;;
+    standard) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","linux","ARM64","jai-ci"]}]}]' ;;
+    tonegate) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","linux","ARM64","jai-ci-tonegate"]}]}]' ;;
+    incompatible) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","linux","ARM64","another-host"]}]}]' ;;
     *) print -r -- '[{"jobs":[]}]' ;;
   esac
 fi
@@ -63,7 +63,7 @@ export TRIPS_LINUX_LIMA_SLOT=a
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
 export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"
 export TRIPS_LINUX_LIMA_CLI="$fake_lima"
-export TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate'
+export TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend'
 export TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS=1
 export TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS=0.1
 source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
@@ -74,12 +74,22 @@ assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
 }
 
-for scenario in standard tonegate; do
-  export FAKE_SCENARIO="$scenario"
-  assert_equal 'jai/tonegate' "$(next_repository)"
-done
+if [[ -o pipefail ]]; then
+  print -u2 -- 'Controller source must not enable pipefail globally'
+  exit 1
+fi
+printf '%s' probe | base64url >/dev/null
+if [[ -o pipefail ]]; then
+  print -u2 -- 'Pipeline helpers must restore the caller pipefail setting'
+  exit 1
+fi
+
+export FAKE_SCENARIO=standard
+assert_equal 2026-08-25T00:00:01Z "$(workflow_run_oldest_queued_job_timestamp jai/tonegate 101)"
+export FAKE_SCENARIO=tonegate
+assert_equal 2026-08-25T00:00:02Z "$(workflow_run_oldest_queued_job_timestamp jai/tonegate 101)"
 export FAKE_SCENARIO=incompatible
-if next_repository >/dev/null; then
+if workflow_run_oldest_queued_job_timestamp jai/tonegate 101 | /usr/bin/grep -q .; then
   print -u2 -- 'Expected an incompatible Linux label to be rejected'
   exit 1
 fi
@@ -88,6 +98,42 @@ if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
   print -u2 -- 'Expected the public trips-ci repository to stay off private self-hosted runners'
   exit 1
 fi
+
+typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
+typeset -g tonegate_queued_at=2026-08-25T00:03:00Z
+typeset -g api_queued_at=2026-08-25T00:01:00Z
+typeset -g frontend_queued_at=2026-08-25T00:02:00Z
+repository_oldest_queued_job_timestamp() {
+  local queued_at
+  case "$1" in
+    jai/tonegate) queued_at="$tonegate_queued_at" ;;
+    jai/trips-api) queued_at="$api_queued_at" ;;
+    jai/trips-frontend) queued_at="$frontend_queued_at" ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$queued_at" ]] || return 1
+  print -r -- "$queued_at"
+}
+next_repository
+assert_equal jai/trips-api "$selected_repository"
+api_queued_at=""
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+tonegate_queued_at=""
+frontend_queued_at=""
+if next_repository; then
+  print -u2 -- 'Expected no queued Linux repository'
+  exit 1
+fi
+
+repository_oldest_queued_job_timestamp() { return 2; }
+if next_repository; then
+  print -u2 -- 'Expected queue API failures to propagate'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+functions[repository_oldest_queued_job_timestamp]="$production_repository_oldest_queued_job_timestamp"
 
 runner_lookup 'jai/tonegate' 'page-two-runner'
 assert_equal $'4242\tbusy' "$REPLY"
