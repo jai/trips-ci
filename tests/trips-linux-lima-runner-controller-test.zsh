@@ -86,6 +86,7 @@ chmod 700 "$fake_lima"
 
 export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_LINUX_LIMA_SLOT=a
+export LIMA_HOME="${test_directory}/lima-home"
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
 export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"
 export TRIPS_LINUX_LIMA_CLI="$fake_lima"
@@ -96,6 +97,7 @@ export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS=10
 export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS=4
 export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS=1
 source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+mkdir -p "$LIMA_HOME"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
 
@@ -163,6 +165,41 @@ else
   assert_equal 2 "$?"
 fi
 functions[repository_oldest_queued_job_timestamp]="$production_repository_oldest_queued_job_timestamp"
+
+typeset production_selection_sleep="${functions[selection_sleep]}"
+typeset -ga observed_selection_lock_states=()
+typeset -ga observed_selection_sleep_durations=()
+selection_sleep() {
+  observed_selection_sleep_durations+=("$1")
+  if [[ -d "$selection_lock" ]]; then
+    observed_selection_lock_states+=(locked)
+  else
+    observed_selection_lock_states+=(unlocked)
+  fi
+}
+
+acquire_selection_lock
+observed_selection_lock_states=()
+observed_selection_sleep_durations=()
+handle_no_selected_repository 1
+assert_equal locked "${observed_selection_lock_states[1]}"
+assert_equal 120 "${observed_selection_sleep_durations[1]}"
+if [[ -d "$selection_lock" ]]; then
+  print -u2 -- 'Expected an empty healthy scan to release the selection lock after idle sleep'
+  exit 1
+fi
+
+acquire_selection_lock
+observed_selection_lock_states=()
+observed_selection_sleep_durations=()
+handle_no_selected_repository 2
+assert_equal unlocked "${observed_selection_lock_states[1]}"
+assert_equal 60 "${observed_selection_sleep_durations[1]}"
+if [[ -d "$selection_lock" ]]; then
+  print -u2 -- 'Expected a failed queue scan to release the selection lock before backoff'
+  exit 1
+fi
+functions[selection_sleep]="$production_selection_sleep"
 
 runner_lookup 'jai/tonegate' 'page-two-runner'
 assert_equal $'4242\tbusy' "$REPLY"
