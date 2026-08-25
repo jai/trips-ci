@@ -26,6 +26,7 @@ readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
 readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
+readonly network_mode="${TRIPS_TART_NETWORK_MODE:-softnet}"
 
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
@@ -272,6 +273,23 @@ list_ephemeral_vms() {
   return 0
 }
 
+start_tart_vm() {
+  local vm_name="$1" work_disk="$2" vm_log="$3" requested_network_mode="${4:-$network_mode}"
+  local -a network_arguments
+  network_arguments=()
+  case "$requested_network_mode" in
+    shared) ;;
+    softnet) network_arguments=(--net-softnet) ;;
+    *)
+      log "unsupported Tart network mode ${requested_network_mode}"
+      return 1
+      ;;
+  esac
+  "$tart_cli" run --no-graphics --no-audio --no-clipboard \
+    "${network_arguments[@]}" --disk="${work_disk}:sync=none" "$vm_name" >"$vm_log" 2>&1 &
+  REPLY=$!
+}
+
 cleanup_runner_vm() {
   local repository="$1" runner_name="$2" vm_name="$3" work_disk="$4"
   log "deleting ${vm_name}"
@@ -346,9 +364,8 @@ run_one_ephemeral_runner() {
     /usr/sbin/mkfile -n 60g "$work_disk" || return 1
 
     log "starting ${vm_name}"
-    "$tart_cli" run --no-graphics --no-audio --no-clipboard --net-softnet \
-      --disk="${work_disk}:sync=none" "$vm_name" >"$vm_log" 2>&1 &
-    vm_pid=$!
+    start_tart_vm "$vm_name" "$work_disk" "$vm_log" || return 1
+    vm_pid="$REPLY"
     vm_ip=$("$tart_cli" ip "$vm_name" --wait 180) || return 1
     ssh_ready=false
     for _ in {1..60}; do
