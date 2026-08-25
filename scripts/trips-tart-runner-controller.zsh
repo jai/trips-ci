@@ -18,19 +18,26 @@ readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-ke
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
 readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-tart-runner/work-disks}"
+readonly controller_lock="${TRIPS_TART_CONTROLLER_LOCK:-${log_directory}/controller.lock}"
+readonly native_lane_lock="${TRIPS_TART_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
 readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-20}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
 readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
+readonly shlock_cli="${TRIPS_TART_SHLOCK_CLI:-/usr/bin/shlock}"
 readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
 readonly network_mode="${TRIPS_TART_NETWORK_MODE:-softnet}"
+readonly native_capacity_deferred_status=75
 
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 typeset -g selected_repository=""
+typeset -g native_lane_lock_owned=false
+typeset -g native_lane_release_failed=false
+typeset -g native_capacity_reason=""
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -40,6 +47,29 @@ timestamp() {
 
 log() {
   print -r -- "$(timestamp) $*"
+}
+
+acquire_lock() {
+  "$shlock_cli" -f "$1" -p $$
+}
+
+release_lock() {
+  local lock_path="$1" owner_pid=""
+  [[ -r "$lock_path" ]] && read -r owner_pid <"$lock_path"
+  [[ "$owner_pid" != $$ ]] || /bin/rm -f "$lock_path"
+}
+
+acquire_controller_lock() { acquire_lock "$controller_lock"; }
+release_controller_lock() { release_lock "$controller_lock"; }
+release_native_lane() {
+  [[ "$native_lane_lock_owned" == true ]] || return 0
+  release_lock "$native_lane_lock" || {
+    local release_status=$?
+    native_lane_release_failed=true
+    return "$release_status"
+  }
+  native_lane_lock_owned=false
+  native_lane_release_failed=false
 }
 
 base64url() {
@@ -273,6 +303,61 @@ list_ephemeral_vms() {
   return 0
 }
 
+reconcile_startup_ephemeral_vms() {
+  local inventory rows vm_name vm_state preserved
+  preserved=false
+  inventory=$("$tart_cli" list --source local --format json 2>/dev/null) || {
+    log "unable to reconcile startup Tart VMs"
+    return 2
+  }
+  rows=$(printf '%s' "$inventory" | /usr/bin/python3 -c 'import json,sys
+for vm in json.load(sys.stdin):
+    name=str(vm.get("Name", ""))
+    if name.startswith("trips-runner-job-"):
+        print("{}\t{}".format(name, vm.get("State", "unknown")))') || return 2
+  while IFS=$'\t' read -r vm_name vm_state; do
+    [[ -n "$vm_name" ]] || continue
+    if [[ "$vm_state" == stopped ]]; then
+      log "removing safely stopped stale ephemeral VM ${vm_name}"
+      delete_vm "$vm_name" || return 2
+    else
+      log "preserving ${vm_name}; live state is ${vm_state:-unknown}"
+      preserved=true
+    fi
+  done <<< "$rows"
+  [[ "$preserved" == false ]]
+}
+
+native_capacity_available() {
+  local inventory
+  inventory=$("$tart_cli" list --source local --format json 2>/dev/null) || {
+    REPLY=""
+    return 2
+  }
+  REPLY=$(printf '%s' "$inventory" | /usr/bin/python3 -c 'import json,sys
+vms=json.load(sys.stdin)
+print("\n".join(str(vm.get("Name", "")) for vm in vms if vm.get("Name") and (vm.get("Running") is True or vm.get("State") != "stopped")))') || {
+    REPLY=""
+    return 2
+  }
+  [[ -z "$REPLY" ]]
+}
+
+acquire_clean_native_lane() {
+  if ! acquire_lock "$native_lane_lock"; then
+    REPLY="$native_lane_lock"
+    return 3
+  fi
+  native_lane_lock_owned=true
+  if native_capacity_available; then
+    return 0
+  else
+    local capacity_status=$?
+  fi
+  release_native_lane
+  return "$capacity_status"
+}
+
 start_tart_vm() {
   local vm_name="$1" work_disk="$2" vm_log="$3" requested_network_mode="${4:-$network_mode}"
   local -a network_arguments
@@ -305,11 +390,11 @@ resolve_runner_status() {
     0)
       log "${runner_name} claimed a job"
       REPLY=0
-      wait "$runner_pid" || REPLY=$?
+      wait "$runner_pid" || REPLY=1
       ;;
     1)
       REPLY=0
-      wait "$runner_pid" || REPLY=$?
+      wait "$runner_pid" || REPLY=1
       ;;
     2)
       log "${runner_name} remained idle; removing it"
@@ -324,8 +409,29 @@ resolve_runner_status() {
   esac
 }
 
+runner_cycle_status() {
+  local operation_status="$1" cleanup_status="$2"
+  (( cleanup_status == 0 )) || return 1
+  case "$operation_status" in
+    0) return 0 ;;
+    "$native_capacity_deferred_status") return "$native_capacity_deferred_status" ;;
+    *) return 1 ;;
+  esac
+}
+
+runner_cycle_log_message() {
+  local cycle_status="$1" repository="$2"
+  case "$cycle_status" in
+    0) REPLY="ephemeral runner completed a job for ${repository}" ;;
+    "$native_capacity_deferred_status")
+      REPLY="waiting for exclusive native capacity before serving ${repository}: ${native_capacity_reason}"
+      ;;
+    *) REPLY="ephemeral runner cycle failed for ${repository}; retrying in 30 seconds" ;;
+  esac
+}
+
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count lane_status cleanup_status operation_status
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -334,6 +440,8 @@ run_one_ephemeral_runner() {
   vm_pid=""
   runner_pid=""
   runner_status=1
+  operation_status=1
+  native_capacity_reason=""
 
   if ! repository_is_private "$repository"; then
     log "refusing non-private or unavailable repository ${repository}"
@@ -351,8 +459,20 @@ run_one_ephemeral_runner() {
     /bin/sleep 15
   done
 
+  if acquire_clean_native_lane; then
+    :
+  else
+    lane_status=$?
+    (( lane_status == 2 )) && return 1
+    native_capacity_reason="$REPLY"
+    return "$native_capacity_deferred_status"
+  fi
+
   log "cloning ${base_vm} to ${vm_name}"
-  "$tart_cli" clone "$base_vm" "$vm_name" || return 1
+  "$tart_cli" clone "$base_vm" "$vm_name" || {
+    release_native_lane
+    return 1
+  }
 
   cleanup_vm() {
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name" "$work_disk"
@@ -360,43 +480,57 @@ run_one_ephemeral_runner() {
   trap 'cleanup_vm || exit 1; exit 130' INT TERM
 
   {
-    "$tart_cli" set "$vm_name" --random-mac --random-serial || return 1
-    /usr/sbin/mkfile -n 60g "$work_disk" || return 1
+    while true; do
+      "$tart_cli" set "$vm_name" --random-mac --random-serial || break
+      /usr/sbin/mkfile -n 60g "$work_disk" || break
 
-    log "starting ${vm_name}"
-    start_tart_vm "$vm_name" "$work_disk" "$vm_log" || return 1
-    vm_pid="$REPLY"
-    vm_ip=$("$tart_cli" ip "$vm_name" --wait 180) || return 1
-    ssh_ready=false
-    for _ in {1..60}; do
-      if /usr/bin/ssh \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -i "$ssh_key" \
-        "admin@${vm_ip}" true 2>/dev/null; then
-        ssh_ready=true
+      if native_capacity_available; then
+        :
+      else
+        lane_status=$?
+        if (( lane_status == 1 )); then
+          native_capacity_reason="${(j:, :)${(f)REPLY}}"
+          log "yielding before Tart start because another native VM became active: ${native_capacity_reason}"
+          operation_status="$native_capacity_deferred_status"
+          break
+        fi
+        log "unable to verify native capacity before Tart start"
         break
       fi
-      /bin/sleep 2
-    done
-    [[ "$ssh_ready" == true ]] || return 1
-    log "${vm_name} booted"
+      log "starting ${vm_name}"
+      start_tart_vm "$vm_name" "$work_disk" "$vm_log" || break
+      vm_pid="$REPLY"
+      vm_ip=$("$tart_cli" ip "$vm_name" --wait 180) || break
+      ssh_ready=false
+      for _ in {1..60}; do
+        if /usr/bin/ssh \
+          -o BatchMode=yes \
+          -o ConnectTimeout=3 \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -i "$ssh_key" \
+          "admin@${vm_ip}" true 2>/dev/null; then
+          ssh_ready=true
+          break
+        fi
+        /bin/sleep 2
+      done
+      [[ "$ssh_ready" == true ]] || break
+      log "${vm_name} booted"
 
-    /usr/bin/ssh \
+      /usr/bin/ssh \
       -o BatchMode=yes \
       -o ConnectTimeout=30 \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || return 1
+      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || break
 
-    registration_token "$repository" || return 1
-    token="$REPLY"
-    log "registering ${runner_name} for ${repository}"
-    printf '%s\n' "$token" | /usr/bin/ssh \
+      registration_token "$repository" || break
+      token="$REPLY"
+      log "registering ${runner_name} for ${repository}"
+      printf '%s\n' "$token" | /usr/bin/ssh \
       -o BatchMode=yes \
       -o ConnectTimeout=30 \
       -o ServerAliveInterval=30 \
@@ -406,17 +540,22 @@ run_one_ephemeral_runner() {
       -i "$ssh_key" \
       "admin@${vm_ip}" \
       "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
-    runner_pid=$!
-    wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
-    local claim_result=$?
-    resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || return 1
-    runner_status="$REPLY"
+      runner_pid=$!
+      wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
+      local claim_result=$?
+      resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || break
+      runner_status="$REPLY"
+      operation_status="$runner_status"
+      break
+    done
   } always {
     trap - INT TERM
-    cleanup_vm || return 1
+    cleanup_status=0
+    cleanup_vm || cleanup_status=$?
     [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
+    release_native_lane || cleanup_status=$?
   }
-  return "$runner_status"
+  runner_cycle_status "$operation_status" "$cleanup_status"
 }
 
 main() {
@@ -424,6 +563,11 @@ main() {
   local -i scan_status
   umask 077
   mkdir -p "$log_directory"
+  if ! acquire_controller_lock; then
+    log "another iOS runner controller owns ${controller_lock}"
+    return 1
+  fi
+  trap 'release_native_lane; release_controller_lock' EXIT
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
     return 1
@@ -456,13 +600,7 @@ main() {
     return 1
   fi
 
-  stale_vms=$(list_ephemeral_vms) || return 1
-  while IFS= read -r stale_vm; do
-    if [[ "$stale_vm" == trips-runner-job-* ]]; then
-      log "removing stale ephemeral VM ${stale_vm}"
-      delete_vm "$stale_vm" || return 1
-    fi
-  done <<< "$stale_vms"
+  reconcile_startup_ephemeral_vms || return 1
   for stale_disk in "${work_disk_directory}"/trips-runner-job-*.raw(N); do
     log "removing stale ephemeral work disk ${stale_disk:t}"
     /bin/rm -f "$stale_disk" || return 1
@@ -471,12 +609,23 @@ main() {
   while true; do
     if next_repository; then
       repository="$selected_repository"
-      if run_one_ephemeral_runner "$repository"; then
-        log "ephemeral runner completed a job for ${repository}"
-      else
-        log "ephemeral runner cycle failed for ${repository}; retrying in 30 seconds"
-        /bin/sleep 30
+      run_one_ephemeral_runner "$repository"
+      scan_status=$?
+      if [[ "$native_lane_release_failed" == true ]]; then
+        log "native-lane unlock failed; terminating controller for supervised recovery"
+        return 1
       fi
+      runner_cycle_log_message "$scan_status" "$repository"
+      log "$REPLY"
+      case "$scan_status" in
+        0) ;;
+        "$native_capacity_deferred_status")
+          /bin/sleep "$idle_scan_interval_seconds"
+          ;;
+        *)
+          /bin/sleep 30
+          ;;
+      esac
     else
       scan_status=$?
       if (( scan_status == 1 )); then

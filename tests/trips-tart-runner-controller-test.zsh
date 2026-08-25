@@ -75,23 +75,54 @@ fi
 if [[ "$1" == list && "${FAKE_VM_INVENTORY_ERROR:-false}" == true ]]; then
   exit 42
 fi
-if [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
+if [[ "$1" == list && "$*" == *'--format json'* ]]; then
+  FAKE_RUNNING_VM="${FAKE_RUNNING_VM:-}" FAKE_EPHEMERAL_STATE="${FAKE_EPHEMERAL_STATE:-}" /usr/bin/python3 -c 'import json,os
+vms=[{"Name":"trips-runner-base","Running":False,"State":"stopped","Source":"local"}]
+running=os.environ["FAKE_RUNNING_VM"]
+state=os.environ["FAKE_EPHEMERAL_STATE"]
+if running:
+    vms.append({"Name":running,"Running":True,"State":"running","Source":"local"})
+if state:
+    vms.append({"Name":"trips-runner-job-stale","Running":state == "running","State":state,"Source":"local"})
+print(json.dumps(vms))'
+elif [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
   print -r -- 'test-vm'
-fi
-if [[ "$1" == list && "${FAKE_STALE_VM_PRESENT:-false}" == true ]]; then
+elif [[ "$1" == list && "${FAKE_STALE_VM_PRESENT:-false}" == true ]]; then
   print -r -- 'trips-runner-job-stale'
 fi
 exit 0
 SCRIPT
 chmod 700 "$fake_tart"
 
+fake_shlock="${test_directory}/shlock"
+cat > "$fake_shlock" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+
+lock_file=""
+owner_pid=""
+while (( $# > 0 )); do
+  case "$1" in
+    -f) lock_file="$2"; shift 2 ;;
+    -p) owner_pid="$2"; shift 2 ;;
+    *) exit 64 ;;
+  esac
+done
+[[ -n "$lock_file" && -n "$owner_pid" ]] || exit 64
+(setopt noclobber; print -r -- "$owner_pid" > "$lock_file") 2>/dev/null
+SCRIPT
+chmod 700 "$fake_shlock"
+
 export TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_TART_GH_CLI="$fake_gh"
 export TRIPS_TART_CURL_CLI="$fake_curl"
 export TRIPS_TART_CLI="$fake_tart"
+export TRIPS_TART_SHLOCK_CLI="$fake_shlock"
 export TRIPS_TART_REPOSITORIES='jai/trips-frontend,jai/tonegate'
 export TRIPS_TART_CLAIM_TIMEOUT_SECONDS=1
 export TRIPS_TART_CLAIM_POLL_SECONDS=0.1
+export TRIPS_TART_CONTROLLER_LOCK="${test_directory}/controller.lock"
+export TRIPS_TART_NATIVE_LANE_LOCK="${test_directory}/native-lane.lock"
 source "${repo_root}/scripts/trips-tart-runner-controller.zsh"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
@@ -103,6 +134,64 @@ assert_equal() {
     return 1
   fi
 }
+
+if runner_cycle_status 0 1; then
+  print -u2 -- 'Expected cleanup failure to override a successful runner operation'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+if runner_cycle_status 2 0; then
+  print -u2 -- 'Expected arbitrary runner exit status to normalize as failure'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+
+(exit 75) &
+runner_pid=$!
+resolve_runner_status 1 "$runner_pid" exit-75-runner
+assert_equal 1 "$REPLY"
+if runner_cycle_status "$REPLY" 0; then
+  print -u2 -- 'Expected runner exit 75 to remain an ordinary runner failure'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+
+runner_cycle_status 0 0
+if runner_cycle_status "$native_capacity_deferred_status" 0; then
+  print -u2 -- 'Expected native-capacity deferral status to remain distinct'
+  exit 1
+else
+  assert_equal "$native_capacity_deferred_status" "$?"
+fi
+
+native_capacity_reason=tonegate-search-20260825
+REPLY=sentinel_installation_token
+runner_cycle_log_message "$native_capacity_deferred_status" jai/trips-frontend
+assert_equal 'waiting for exclusive native capacity before serving jai/trips-frontend: tonegate-search-20260825' "$REPLY"
+[[ "$REPLY" != *sentinel_installation_token* ]]
+REPLY=sentinel_installation_token
+runner_cycle_log_message 2 jai/trips-frontend
+assert_equal 'ephemeral runner cycle failed for jai/trips-frontend; retrying in 30 seconds' "$REPLY"
+[[ "$REPLY" != *sentinel_installation_token* ]]
+
+typeset production_release_lock="${functions[release_lock]}"
+native_lane_lock_owned=true
+native_lane_release_failed=false
+release_lock() { return 7; }
+if release_native_lane; then
+  print -u2 -- 'Expected native-lane unlock failure to propagate'
+  exit 1
+else
+  assert_equal 7 "$?"
+fi
+assert_equal true "$native_lane_lock_owned"
+assert_equal true "$native_lane_release_failed"
+functions[release_lock]="$production_release_lock"
+native_lane_lock_owned=false
+native_lane_release_failed=false
 
 if [[ -o pipefail ]]; then
   print -u2 -- 'Controller source must not enable pipefail globally'
@@ -198,7 +287,7 @@ wait "$fake_runner_pid" 2>/dev/null || true
 ( exit 23 ) &
 fake_runner_pid=$!
 resolve_runner_status 1 "$fake_runner_pid" 'test-runner'
-assert_equal 23 "$REPLY"
+assert_equal 1 "$REPLY"
 
 export FAKE_VM_PRESENT=true
 if delete_vm 'test-vm'; then
@@ -231,6 +320,96 @@ fi
 export FAKE_VM_INVENTORY_ERROR=false
 
 export FAKE_TART_RUN_LOG="${test_directory}/tart-run.log"
+: > "$FAKE_TART_RUN_LOG"
+export FAKE_EPHEMERAL_STATE=running
+if reconcile_startup_ephemeral_vms; then
+  print -u2 -- 'Expected a running startup VM to be preserved and block startup'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
+if /usr/bin/grep -Eq '^(stop|delete) trips-runner-job-stale$' "$FAKE_TART_RUN_LOG"; then
+  print -u2 -- 'Running startup VM was destructively reconciled'
+  exit 1
+fi
+export FAKE_EPHEMERAL_STATE=stopped
+reconcile_startup_ephemeral_vms
+/usr/bin/grep -q '^delete trips-runner-job-stale$' "$FAKE_TART_RUN_LOG"
+export FAKE_EPHEMERAL_STATE=''
+
+export FAKE_RUNNING_VM=tonegate-search-20260825
+if native_capacity_available; then
+  print -u2 -- 'Expected an unrelated running Tart VM to hold native capacity'
+  exit 1
+else
+  assert_equal 1 "$?"
+  assert_equal tonegate-search-20260825 "$REPLY"
+fi
+export FAKE_RUNNING_VM=''
+native_capacity_available
+assert_equal '' "$REPLY"
+export FAKE_VM_INVENTORY_ERROR=true
+if native_capacity_available; then
+  print -u2 -- 'Expected a Tart inventory failure to fail native capacity closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+export FAKE_VM_INVENTORY_ERROR=false
+
+acquire_controller_lock
+if TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+  TRIPS_TART_CONTROLLER_LOCK="$TRIPS_TART_CONTROLLER_LOCK" \
+  zsh -uc 'source "$1"; acquire_controller_lock' \
+  _ "${repo_root}/scripts/trips-tart-runner-controller.zsh"; then
+  print -u2 -- 'Expected the controller singleton lock to reject a live contender'
+  exit 1
+fi
+release_controller_lock
+
+: > "$FAKE_TART_RUN_LOG"
+export FAKE_VM_INVENTORY_ERROR=true
+if acquire_clean_native_lane; then
+  start_tart_vm inventory-error-vm "${test_directory}/inventory-error.raw" "${test_directory}/inventory-error.log"
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+if /usr/bin/grep -q '^run ' "$FAKE_TART_RUN_LOG"; then
+  print -u2 -- 'Inventory failure reached Tart run'
+  exit 1
+fi
+export FAKE_VM_INVENTORY_ERROR=false
+
+: > "$FAKE_TART_RUN_LOG"
+lane_ready="${test_directory}/lane-ready"
+lane_release="${test_directory}/lane-release"
+TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+  TRIPS_TART_CLI="$fake_tart" \
+  TRIPS_TART_NATIVE_LANE_LOCK="$TRIPS_TART_NATIVE_LANE_LOCK" \
+  FAKE_TART_RUN_LOG="$FAKE_TART_RUN_LOG" \
+  zsh -uc 'source "$1"; acquire_clean_native_lane || exit $?; start_tart_vm first-vm "$2" "$3" shared; first_pid="$REPLY"; wait "$first_pid"; : > "$4"; while [[ ! -e "$5" ]]; do sleep 0.02; done; release_native_lane' \
+  _ "${repo_root}/scripts/trips-tart-runner-controller.zsh" "${test_directory}/first.raw" "${test_directory}/first.log" "$lane_ready" "$lane_release" &
+first_contender_pid=$!
+for _ in {1..50}; do
+  [[ -e "$lane_ready" ]] && break
+  sleep 0.02
+done
+[[ -e "$lane_ready" ]] || {
+  print -u2 -- 'First native-lane contender did not acquire the lock'
+  exit 1
+}
+TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+  TRIPS_TART_CLI="$fake_tart" \
+  TRIPS_TART_NATIVE_LANE_LOCK="$TRIPS_TART_NATIVE_LANE_LOCK" \
+  FAKE_TART_RUN_LOG="$FAKE_TART_RUN_LOG" \
+  zsh -uc 'source "$1"; if acquire_clean_native_lane; then start_tart_vm second-vm "$2" "$3" shared; second_pid="$REPLY"; wait "$second_pid"; release_native_lane; fi' \
+  _ "${repo_root}/scripts/trips-tart-runner-controller.zsh" "${test_directory}/second.raw" "${test_directory}/second.log"
+: > "$lane_release"
+wait "$first_contender_pid"
+assert_equal 0 "$?"
+assert_equal 1 "$(/usr/bin/grep -c '^run ' "$FAKE_TART_RUN_LOG")"
+
 assert_configured_network_invocation() {
   local configured_mode="$1" vm_name="$2" expected_invocation="$3"
   local work_disk="${test_directory}/${vm_name}.raw" vm_log="${test_directory}/${vm_name}.log"
