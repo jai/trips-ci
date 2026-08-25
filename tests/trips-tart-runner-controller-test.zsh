@@ -246,6 +246,17 @@ fi
 functions[repository_oldest_queued_job_timestamp]="$production_repository_oldest_queued_job_timestamp"
 
 assert_equal 20 "$minimum_root_free_gib"
+
+cache_home="${test_directory}/runner-home"
+cache_work="${test_directory}/runner-work"
+mkdir -p "${cache_home}/.maestro/tests"
+touch "${cache_home}/.maestro/tests/stale.log"
+eval "$(runner_home_cache_setup_command "$cache_home" "$cache_work")"
+[[ -L "${cache_home}/.maestro" ]]
+assert_equal "${cache_work}/maestro" "$(readlink "${cache_home}/.maestro")"
+[[ -d "${cache_work}/maestro" ]]
+[[ ! -e "${cache_work}/maestro/tests/stale.log" ]]
+
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
 assert_equal $'4343\tidle' "$REPLY"
 
