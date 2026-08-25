@@ -15,26 +15,31 @@ request="$*"
 case "${FAKE_SCENARIO:-}" in
   tonegate-only)
     if [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]]; then
-      print -r -- $'101\tjai/tonegate'
+      print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
     elif [[ "$request" == *'repos/jai/tonegate/actions/runs/101/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
     fi
     ;;
   trips-first)
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'202\tjai/trips-frontend'
+      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
     fi
     ;;
   incompatible-host)
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'303\tjai/trips-frontend'
+      print -r -- $'303\t2026-08-25T00:00:00Z\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/303/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","labels":["self-hosted","macOS","ARM64","tart","ios","another-host"]}]}]'
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","another-host"]}]}]'
     fi
     ;;
   no-jobs)
+    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
+      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
+    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
+      print -r -- '[{"jobs":[]}]'
+    fi
     ;;
   *)
     print -u2 -- "Unknown fake scenario"
@@ -93,15 +98,57 @@ assert_equal() {
   fi
 }
 
+if [[ -o pipefail ]]; then
+  print -u2 -- 'Controller source must not enable pipefail globally'
+  exit 1
+fi
+printf '%s' probe | base64url >/dev/null
+if [[ -o pipefail ]]; then
+  print -u2 -- 'Pipeline helpers must restore the caller pipefail setting'
+  exit 1
+fi
+
 export FAKE_SCENARIO=tonegate-only
-assert_equal 'jai/tonegate' "$(next_repository)"
+assert_equal 2026-08-25T00:00:01Z "$(workflow_run_oldest_queued_job_timestamp jai/tonegate 101)"
 export FAKE_SCENARIO=trips-first
-assert_equal 'jai/trips-frontend' "$(next_repository)"
+assert_equal 2026-08-25T00:00:02Z "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202)"
 export FAKE_SCENARIO=no-jobs
-if next_repository >/dev/null; then
+if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202 | /usr/bin/grep -q .; then
+  print -u2 -- 'Expected no matching queued job'
+  exit 1
+fi
+
+typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
+typeset -g frontend_queued_at=2026-08-25T00:03:00Z
+typeset -g tonegate_queued_at=2026-08-25T00:01:00Z
+repository_oldest_queued_job_timestamp() {
+  local queued_at
+  case "$1" in
+    jai/trips-frontend) queued_at="$frontend_queued_at" ;;
+    jai/tonegate) queued_at="$tonegate_queued_at" ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$queued_at" ]] || return 1
+  print -r -- "$queued_at"
+}
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+tonegate_queued_at=""
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+frontend_queued_at=""
+if next_repository; then
   print -u2 -- 'Expected no queued repository'
   exit 1
 fi
+repository_oldest_queued_job_timestamp() { return 2; }
+if next_repository; then
+  print -u2 -- 'Expected queue lookup failures to propagate'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+functions[repository_oldest_queued_job_timestamp]="$production_repository_oldest_queued_job_timestamp"
 
 assert_equal 20 "$minimum_root_free_gib"
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
@@ -169,7 +216,7 @@ if list_ephemeral_vms >/dev/null; then
 fi
 
 export FAKE_SCENARIO=incompatible-host
-if next_repository >/dev/null; then
+if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 303 | /usr/bin/grep -q .; then
   print -u2 -- 'Expected a job with an incompatible host label to be rejected'
   exit 1
 fi
