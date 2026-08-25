@@ -21,6 +21,9 @@ readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
 readonly timeout_python="${TRIPS_LINUX_LIMA_TIMEOUT_PYTHON:-/usr/bin/python3}"
+readonly timeout_preexec_delay_seconds="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_DELAY_SECONDS:-0}"
+readonly timeout_preexec_ready_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_READY_FILE:-}"
+readonly timeout_preexec_release_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_RELEASE_FILE:-}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
@@ -327,16 +330,89 @@ run_with_timeout() {
   shift
   zmodload zsh/system || return 1
   expected_parent_pid="$sysparams[pid]"
-  "$timeout_python" -c 'import os, signal, subprocess, sys, time
+  "$timeout_python" -c 'import os, select, signal, subprocess, sys, time
 expected_parent = int(sys.argv[1])
 timeout = float(sys.argv[2])
-handled_signals = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+preexec_delay = float(sys.argv[3])
+preexec_ready_file = sys.argv[4]
+preexec_release_file = sys.argv[5]
+handled_signals = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
 if os.getppid() != expected_parent:
     raise SystemExit(130)
+if hasattr(select, "kqueue"):
+    parent_watch = select.kqueue()
+    try:
+        parent_watch.control([
+            select.kevent(
+                expected_parent,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+        ], 0, 0)
+    except ProcessLookupError:
+        raise SystemExit(130)
+    def parent_exited():
+        return bool(parent_watch.control(None, 1, 0))
+    def parent_exited_now():
+        child_watch = select.kqueue()
+        try:
+            child_watch.control([
+                select.kevent(
+                    expected_parent,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+            ], 0, 0)
+            return bool(child_watch.control(None, 1, 0))
+        except ProcessLookupError:
+            return True
+        finally:
+            child_watch.close()
+elif hasattr(os, "pidfd_open"):
+    try:
+        parent_watch = os.pidfd_open(expected_parent)
+    except ProcessLookupError:
+        raise SystemExit(130)
+    parent_poll = select.poll()
+    parent_poll.register(parent_watch, select.POLLIN)
+    def parent_exited():
+        return bool(parent_poll.poll(0))
+    def parent_exited_now():
+        try:
+            child_watch = os.pidfd_open(expected_parent)
+        except ProcessLookupError:
+            return True
+        try:
+            child_poll = select.poll()
+            child_poll.register(child_watch, select.POLLIN)
+            return bool(child_poll.poll(0))
+        finally:
+            os.close(child_watch)
+else:
+    raise RuntimeError("kernel-backed parent exit observation is unavailable")
 signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals)
-if os.getppid() != expected_parent:
+if os.getppid() != expected_parent or parent_exited():
     raise SystemExit(130)
-process = subprocess.Popen(sys.argv[3:], start_new_session=True)
+def prepare_child():
+    for handled_signal in handled_signals:
+        signal.signal(handled_signal, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, handled_signals)
+    if preexec_ready_file:
+        with open(preexec_ready_file, "w", encoding="utf-8") as ready_file:
+            ready_file.write("ready\n")
+    while preexec_release_file and not os.path.exists(preexec_release_file):
+        time.sleep(0.01)
+    if preexec_delay > 0:
+        time.sleep(preexec_delay)
+    if parent_exited_now():
+        os._exit(130)
+process = subprocess.Popen(
+    sys.argv[6:],
+    start_new_session=True,
+    preexec_fn=prepare_child,
+)
 def stop(signum, _frame):
     if process.poll() is None:
         try:
@@ -365,7 +441,9 @@ while True:
         break
     except subprocess.TimeoutExpired:
         pass
-raise SystemExit(status if status >= 0 else 128 + (-status))' "$expected_parent_pid" "$timeout_seconds" "$@" &
+raise SystemExit(status if status >= 0 else 128 + (-status))' \
+    "$expected_parent_pid" "$timeout_seconds" "$timeout_preexec_delay_seconds" \
+    "$timeout_preexec_ready_file" "$timeout_preexec_release_file" "$@" &
   timeout_pid=$!
   active_timeout_pid="$timeout_pid"
   timeout_status=0
