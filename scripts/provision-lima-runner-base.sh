@@ -11,9 +11,13 @@ node_root="/usr/local/lib/nodejs"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  build-essential ca-certificates curl docker-compose-v2 docker.io gh git git-lfs jq rsync shellcheck unzip xz-utils
+  build-essential ca-certificates curl docker-compose-v2 docker.io gh git git-lfs jq psmisc rsync shellcheck unzip xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer
+systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service
+systemctl mask apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service
 
 systemctl enable --now docker
 if ! id -nG jai | tr ' ' '\n' | grep -qx docker; then

@@ -20,7 +20,7 @@ readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-sele
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
-readonly timeout_cli="${TRIPS_LINUX_LIMA_TIMEOUT_CLI:-/opt/homebrew/bin/gtimeout}"
+readonly timeout_python="${TRIPS_LINUX_LIMA_TIMEOUT_PYTHON:-/usr/bin/python3}"
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-30}"
@@ -321,17 +321,32 @@ package_manager_sleep() {
   /bin/sleep "$1"
 }
 
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  "$timeout_python" -c 'import os, signal, subprocess, sys
+timeout = float(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    status = process.wait(timeout)
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    raise SystemExit(124)
+raise SystemExit(status if status >= 0 else 128 + (-status))' "$timeout_seconds" "$@"
+}
+
 wait_for_guest_package_manager() {
   local vm_name="$1" started_at deadline now remaining probe_timeout probe_output probe_status sleep_seconds
-  if ! "$timeout_cli" --signal=KILL "${package_manager_probe_timeout_seconds}s" \
-    "$lima_cli" shell "$vm_name" -- bash -lc \
-      'test -x /usr/bin/fuser && sudo -n true'; then
-    log "package-manager readiness preflight failed in ${vm_name}"
-    return 1
-  fi
   package_manager_now
   started_at="$REPLY"
   deadline=$((started_at + package_manager_timeout_seconds))
+  if ! run_with_timeout "$package_manager_timeout_seconds" \
+    "$lima_cli" shell "$vm_name" -- bash -lc \
+      'test -x /usr/bin/fuser && sudo -n true && sudo -n systemctl stop apt-daily.timer apt-daily-upgrade.timer && sudo -n systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades.service && sudo -n systemctl mask --runtime apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service'; then
+    log "package-manager readiness preflight failed in ${vm_name}"
+    return 1
+  fi
   while true; do
     package_manager_now
     now="$REPLY"
@@ -342,7 +357,7 @@ wait_for_guest_package_manager() {
     fi
     probe_timeout="$package_manager_probe_timeout_seconds"
     (( probe_timeout > remaining )) && probe_timeout="$remaining"
-    if probe_output=$("$timeout_cli" --signal=KILL "${probe_timeout}s" \
+    if probe_output=$(run_with_timeout "$probe_timeout" \
       "$lima_cli" shell "$vm_name" -- bash -lc \
         'sudo -n bash -c '\''/usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; printf "%s\\n" "$?"'\'''); then
       probe_status="${probe_output//$'\r'/}"
