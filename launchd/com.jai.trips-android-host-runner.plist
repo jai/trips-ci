@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.jai.trips-android-host-runner</string>
+<key>ProgramArguments</key><array><string>/Users/jai/.local/bin/start-trips-android-host-runner.zsh</string></array>
+<key>KeepAlive</key><true/><key>RunAtLoad</key><true/><key>ThrottleInterval</key><integer>30</integer>
+<key>StandardOutPath</key><string>/Users/jai/Library/Logs/trips-android-host-runner/launcher.log</string>
+<key>StandardErrorPath</key><string>/Users/jai/Library/Logs/trips-android-host-runner/launcher.err</string>
+</dict></plist>
