@@ -293,6 +293,36 @@ assert_equal jai/tonegate "${clone_failure_cleanup[1]}"
   exit 1
 }
 
+acquire_selection_lock jai/tonegate
+claimed_repository_lock="$selected_repository_lock"
+typeset production_wait_for_guest_package_manager="${functions[wait_for_guest_package_manager]}"
+typeset production_registration_token="${functions[registration_token]}"
+typeset production_wait_for_runner_claim="${functions[wait_for_runner_claim]}"
+typeset production_resolve_runner_status="${functions[resolve_runner_status]}"
+typeset -g claim_resolution_lock_state=""
+repository_is_private() { return 0; }
+wait_for_guest_package_manager() { return 0; }
+registration_token() { REPLY=test-token; }
+wait_for_runner_claim() { return 0; }
+resolve_runner_status() {
+  if [[ -n "$selected_repository_lock" || -d "$claimed_repository_lock" ]]; then
+    claim_resolution_lock_state=locked
+  else
+    claim_resolution_lock_state=unlocked
+  fi
+  wait "$2" 2>/dev/null || true
+  REPLY=0
+}
+cleanup_runner_vm() { return 0; }
+run_one_ephemeral_runner jai/tonegate
+assert_equal unlocked "$claim_resolution_lock_state"
+functions[repository_is_private]="$production_repository_is_private"
+functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
+functions[registration_token]="$production_registration_token"
+functions[wait_for_runner_claim]="$production_wait_for_runner_claim"
+functions[resolve_runner_status]="$production_resolve_runner_status"
+functions[cleanup_runner_vm]="$production_cleanup_runner_vm"
+
 clone_signal_home="${test_directory}/clone-signal-home"
 clone_signal_started="${test_directory}/clone-signal-started"
 clone_signal_cleanup="${test_directory}/clone-signal-cleanup"

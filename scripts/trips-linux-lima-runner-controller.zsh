@@ -610,7 +610,7 @@ wait_for_guest_package_manager() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name token runner_name runner_pid runner_status
+  local repository="$1" suffix vm_name token runner_name runner_pid runner_status claim_result
   local vm_cleanup_required=false
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-${slot}-job-${suffix}"
@@ -648,7 +648,10 @@ run_one_ephemeral_runner() {
       bash -lc "IFS= read -r registration_token; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work _work; exec ./run.sh" &
     runner_pid=$!
     wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
-    local claim_result=$?
+    claim_result=$?
+    # Once GitHub marks this runner busy, it owns exactly one queued job and the
+    # other slot can safely provision another ephemeral runner for this repo.
+    (( claim_result == 0 )) && release_selection_lock
     resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || return 1
     runner_status="$REPLY"
   } always {
