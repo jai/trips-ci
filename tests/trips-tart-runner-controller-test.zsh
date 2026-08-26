@@ -290,9 +290,15 @@ assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
 assert_equal idle "$REPLY"
 runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'
-runner_label_state 'self-hosted,macos,arm64,tart'
+if runner_label_state 'self-hosted,macos,arm64,tart'; then
+  print -u2 -- 'Expected a runner missing a canonical label to remain pending'
+  exit 1
+fi
 assert_equal pending "$REPLY"
-runner_label_state 'self-hosted,macos,arm64,tart,ios,extra'
+if runner_label_state 'self-hosted,macos,arm64,tart,ios,extra'; then
+  print -u2 -- 'Expected a runner with an extra label to be rejected'
+  exit 1
+fi
 assert_equal unexpected "$REPLY"
 if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'; then
   print -u2 -- 'Expected a runner with a physical-host label to be rejected'
