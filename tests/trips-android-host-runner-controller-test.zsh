@@ -104,6 +104,7 @@ work_volume_mounted
 [[ ! -e "$test_root/work-volume/work" ]]
 prepare_work_root
 [[ -d "$test_root/work-volume/work" && -w "$test_root/work-volume/work" ]]
+[[ "$PWD" == "$test_root/work-volume" ]]
 if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_WORK_VOLUME="$test_root/not-mounted" TRIPS_ANDROID_WORK_ROOT="$test_root/not-mounted/work" \
   TRIPS_ANDROID_MOUNT_CLI="$fake_mount" zsh -c 'source "$1"; work_volume_mounted' zsh "$repo_root/scripts/trips-android-host-runner-controller.zsh"; then
   print -u2 -- 'an absent external Android work volume must fail closed'
