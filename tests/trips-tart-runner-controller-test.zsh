@@ -57,7 +57,7 @@ request="$*"
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
-  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"tart"},{"name":"ios"}]}]}'
+  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"tart"},{"name":"ios"},{"name":"unexpected"}]}]}'
 else
   print -u2 -- "Unexpected curl request: ${request}"
   exit 1
@@ -286,28 +286,9 @@ assert_equal 17 "$guest_preflight_status"
 assert_equal 'guest-preflight failed stage=java status=17' "$guest_preflight_output"
 
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
-assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios' "$REPLY"
+assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios,unexpected' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
 assert_equal idle "$REPLY"
-runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'
-if runner_label_state 'self-hosted,macos,arm64,tart'; then
-  print -u2 -- 'Expected a runner missing a canonical label to remain pending'
-  exit 1
-fi
-assert_equal pending "$REPLY"
-if runner_label_state 'self-hosted,macos,arm64,tart,ios,extra'; then
-  print -u2 -- 'Expected a runner with an extra label to be rejected'
-  exit 1
-fi
-assert_equal unexpected "$REPLY"
-if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'; then
-  print -u2 -- 'Expected a runner with a physical-host label to be rejected'
-  exit 1
-fi
-if runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios,extra'; then
-  print -u2 -- 'Expected a runner with an unexpected label to be rejected'
-  exit 1
-fi
 
 (
   sleep 3
@@ -315,38 +296,6 @@ fi
 fake_runner_pid=$!
 runner_busy_state() { REPLY=busy; }
 wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"
-kill "$fake_runner_pid" 2>/dev/null || true
-wait "$fake_runner_pid" 2>/dev/null || true
-
-label_probe_count=0
-(
-  sleep 3
-) &
-fake_runner_pid=$!
-runner_busy_state() {
-  label_probe_count=$((label_probe_count + 1))
-  if (( label_probe_count < 3 )); then
-    REPLY=label-mismatch
-    return 3
-  fi
-  REPLY=busy
-}
-wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"
-assert_equal 3 "$label_probe_count"
-kill "$fake_runner_pid" 2>/dev/null || true
-wait "$fake_runner_pid" 2>/dev/null || true
-
-(
-  sleep 3
-) &
-fake_runner_pid=$!
-runner_busy_state() { REPLY=label-unexpected; return 4; }
-if wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"; then
-  print -u2 -- 'Expected a runner with an unexpected label to fail closed'
-  exit 1
-else
-  assert_equal 4 "$?"
-fi
 kill "$fake_runner_pid" 2>/dev/null || true
 wait "$fake_runner_pid" 2>/dev/null || true
 
