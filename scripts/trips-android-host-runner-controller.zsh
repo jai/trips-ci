@@ -52,34 +52,59 @@ emulator_acceleration_healthy() {
 }
 
 queued_android_job_exists() {
-  "$gh_cli" api --paginate "repos/${repository}/actions/runs?status=queued&per_page=100" --jq '.workflow_runs[].id' |
-    while IFS= read -r run_id; do
-      "$gh_cli" api --paginate "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" --jq '
-        .jobs[] | select(.status == "queued") | [.labels[] | ascii_downcase] |
-        if (index("self-hosted") and index("macos") and index("arm64") and index("android") and index("borg-cube-03")) then "yes" else empty end
-      ' | grep -qx yes && return 0
-    done
+  local run_ids run_id queued_labels
+  run_ids=$("$gh_cli" api --paginate "repos/${repository}/actions/runs?status=queued&per_page=100" --jq '.workflow_runs[].id') || return 1
+  [[ -n "${run_ids//[[:space:]]/}" ]] || return 1
+  while IFS= read -r run_id; do
+    [[ -n "$run_id" ]] || continue
+    queued_labels=$("$gh_cli" api --paginate "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" --jq '
+      .jobs[] | select(.status == "queued") | [.labels[] | ascii_downcase] |
+      if (index("self-hosted") and index("macos") and index("arm64") and index("android") and index("borg-cube-03")) then "yes" else empty end
+    ') || return 1
+    grep -qx yes <<<"$queued_labels" && return 0
+  done <<<"$run_ids"
+  return 1
+}
+
+delete_runner_registration() {
+  local runner_name="$1" runner_id
+  runner_id=$("$gh_cli" api --paginate "repos/${repository}/actions/runners?per_page=100" --jq --arg name "$runner_name" '.runners[]? | select(.name == $name) | .id') || return 1
+  [[ -n "$runner_id" ]] || return 0
+  "$gh_cli" api -X DELETE "repos/${repository}/actions/runners/${runner_id}" >/dev/null
 }
 
 run_one_job() {
-  local suffix job_root runner_name token runner_pid
+  local suffix job_root runner_name token runner_pid runner_status cleanup_status=0
   suffix="$(date -u '+%Y%m%d%H%M%S')-$$"
   job_root="${work_root}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
   mkdir -p "$job_root"
-  trap '[[ -n "${runner_pid:-}" ]] && kill "$runner_pid" 2>/dev/null || true; /bin/rm -rf -- "$job_root"; release_native_lane' INT TERM EXIT
-  ditto "$runner_root" "$job_root/runner"
-  token=$("$gh_cli" api -X POST "repos/${repository}/actions/runners/registration-token" --jq .token) || return 1
+  ditto "$runner_root" "$job_root/runner" || {
+    /bin/rm -rf -- "$job_root"
+    return 1
+  }
+  token=$("$gh_cli" api -X POST "repos/${repository}/actions/runners/registration-token" --jq .token) || {
+    /bin/rm -rf -- "$job_root"
+    return 1
+  }
   print -r -- "$token" | (
     cd "$job_root/runner" || exit 1
     IFS= read -r token
     export TMPDIR="$job_root/tmp" npm_config_cache="$job_root/npm" GRADLE_USER_HOME="$job_root/gradle"
     export ANDROID_SDK_ROOT="$sdk_root" ANDROID_HOME="$sdk_root" ANDROID_AVD_HOME="$avd_root" ANDROID_USER_HOME="${avd_root:h}"
-    ./config.sh --unattended --ephemeral --disableupdate --url "https://github.com/${repository}" --token "$token" --name "$runner_name" --labels "${host_label},android" --work "$job_root/work"
-    exec ./run.sh
+    ./config.sh --unattended --ephemeral --disableupdate --url "https://github.com/${repository}" --token "$token" --name "$runner_name" --labels "${host_label},android" --work "$job_root/work" || exit $?
+    ./run.sh
   ) &
   runner_pid=$!
-  wait "$runner_pid"
+  if wait "$runner_pid"; then
+    runner_status=0
+  else
+    runner_status=$?
+  fi
+  delete_runner_registration "$runner_name" || cleanup_status=$?
+  /bin/rm -rf -- "$job_root"
+  (( cleanup_status == 0 )) || return "$cleanup_status"
+  return "$runner_status"
 }
 
 main() {
