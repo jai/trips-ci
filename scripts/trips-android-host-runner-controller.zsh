@@ -13,9 +13,15 @@ readonly lock_path="${TRIPS_ANDROID_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/tr
 readonly controller_lock="${TRIPS_ANDROID_CONTROLLER_LOCK:-/Users/jai/Library/Logs/trips-android-host-runner/controller.lock}"
 readonly gh_cli="${TRIPS_ANDROID_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly shlock_cli="${TRIPS_ANDROID_SHLOCK_CLI:-/usr/bin/shlock}"
+readonly pgrep_cli="${TRIPS_ANDROID_PGREP_CLI:-/usr/bin/pgrep}"
 readonly minimum_free_gib="${TRIPS_ANDROID_MINIMUM_FREE_GIB:-5}"
+readonly claim_timeout_seconds="${TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS:-300}"
+readonly claim_poll_seconds="${TRIPS_ANDROID_CLAIM_POLL_SECONDS:-2}"
 
 typeset -g native_lock_owned=false
+typeset -g active_runner_pid=""
+typeset -g active_runner_name=""
+typeset -g active_job_root=""
 
 log() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"; }
 acquire_lock() { "$shlock_cli" -f "$1" -p $$; }
@@ -45,24 +51,27 @@ android_preflight() {
 
 emulator_acceleration_healthy() {
   "$sdk_root/emulator/emulator" -accel-check 2>&1 | awk '
-    /^accel: 0$/ { status = 1 }
-    /is installed and usable/ { usable = 1 }
-    END { exit !(status && usable) }
+    NR == 1 && /^accel:$/ { header = 1 }
+    NR == 2 && /^0$/ { status = 1 }
+    NR == 3 && /^Hypervisor\.Framework OS X Version [0-9.]+$/ { hypervisor = 1 }
+    NR == 4 && /^accel$/ { summary = 1 }
+    END { exit !(header && status && hypervisor && summary) }
   '
 }
 
 queued_android_job_exists() {
-  local run_ids run_id queued_labels
-  run_ids=$("$gh_cli" api --paginate "repos/${repository}/actions/runs?status=queued&per_page=100" --jq '.workflow_runs[].id') || return 1
-  [[ -n "${run_ids//[[:space:]]/}" ]] || return 1
-  while IFS= read -r run_id; do
-    [[ -n "$run_id" ]] || continue
-    queued_labels=$("$gh_cli" api --paginate "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" --jq '
-      .jobs[] | select(.status == "queued") | [.labels[] | ascii_downcase] |
-      if (index("self-hosted") and index("macos") and index("arm64") and index("android") and index("borg-cube-03")) then "yes" else empty end
-    ') || return 1
-    grep -qx yes <<<"$queued_labels" && return 0
-  done <<<"$run_ids"
+  local run_status run_ids run_id queued_labels
+  for run_status in queued in_progress; do
+    run_ids=$("$gh_cli" api --paginate "repos/${repository}/actions/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id') || return 1
+    while IFS= read -r run_id; do
+      [[ -n "$run_id" ]] || continue
+      queued_labels=$("$gh_cli" api --paginate "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" --jq '
+        .jobs[] | select(.status == "queued") | [.labels[] | ascii_downcase] |
+        if (index("self-hosted") and index("macos") and index("arm64") and index("android") and index("borg-cube-03")) then "yes" else empty end
+      ') || return 1
+      grep -qx yes <<<"$queued_labels" && return 0
+    done <<<"$run_ids"
+  done
   return 1
 }
 
@@ -73,8 +82,56 @@ delete_runner_registration() {
   "$gh_cli" api -X DELETE "repos/${repository}/actions/runners/${runner_id}" >/dev/null
 }
 
+runner_process_running() { kill -0 "$1" 2>/dev/null; }
+
+runner_worker_claimed() {
+  "$pgrep_cli" -f "$1/runner/bin/Runner.Worker" >/dev/null 2>&1
+}
+
+wait_for_runner_claim() {
+  local runner_pid="$1" job_root="$2" deadline
+  deadline=$((SECONDS + claim_timeout_seconds))
+  while runner_process_running "$runner_pid"; do
+    runner_worker_claimed "$job_root" && return 0
+    (( SECONDS >= deadline )) && return 2
+    sleep "$claim_poll_seconds"
+  done
+  return 1
+}
+
+terminate_runner_process() {
+  local runner_pid="$1" child_pid
+  [[ -n "$runner_pid" ]] || return 0
+  while IFS= read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    terminate_runner_process "$child_pid"
+  done < <("$pgrep_cli" -P "$runner_pid" 2>/dev/null || true)
+  kill -TERM "$runner_pid" 2>/dev/null || true
+}
+
+clear_active_runner() {
+  active_runner_pid=""
+  active_runner_name=""
+  active_job_root=""
+}
+
+cleanup_active_runner() {
+  local cleanup_status=0
+  [[ -n "$active_runner_pid" ]] && terminate_runner_process "$active_runner_pid"
+  if [[ -n "$active_runner_name" ]]; then
+    if delete_runner_registration "$active_runner_name"; then
+      :
+    else
+      cleanup_status=$?
+    fi
+  fi
+  [[ -n "$active_job_root" ]] && /bin/rm -rf -- "$active_job_root"
+  clear_active_runner
+  return "$cleanup_status"
+}
+
 run_one_job() {
-  local suffix job_root runner_name token runner_pid runner_status cleanup_status=0
+  local suffix job_root runner_name token runner_pid runner_status claim_status cleanup_status=0
   suffix="$(date -u '+%Y%m%d%H%M%S')-$$"
   job_root="${work_root}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
@@ -96,13 +153,25 @@ run_one_job() {
     ./run.sh
   ) &
   runner_pid=$!
-  if wait "$runner_pid"; then
-    runner_status=0
+  active_runner_pid="$runner_pid"
+  active_runner_name="$runner_name"
+  active_job_root="$job_root"
+  if wait_for_runner_claim "$runner_pid" "$job_root"; then
+    if wait "$runner_pid"; then
+      runner_status=0
+    else
+      runner_status=$?
+    fi
   else
-    runner_status=$?
+    claim_status=$?
+    log "Android runner did not claim a job (status ${claim_status}); terminating it"
+    terminate_runner_process "$runner_pid"
+    wait "$runner_pid" 2>/dev/null || true
+    runner_status="$claim_status"
   fi
   delete_runner_registration "$runner_name" || cleanup_status=$?
   /bin/rm -rf -- "$job_root"
+  clear_active_runner
   (( cleanup_status == 0 )) || return "$cleanup_status"
   return "$runner_status"
 }
@@ -110,7 +179,8 @@ run_one_job() {
 main() {
   mkdir -p "${controller_lock:h}" "$work_root"
   acquire_lock "$controller_lock" || return 1
-  trap 'release_native_lane; release_lock "$controller_lock"' EXIT
+  trap 'cleanup_active_runner; release_native_lane; release_lock "$controller_lock"' EXIT
+  trap 'exit 143' INT TERM
   "$gh_cli" auth status >/dev/null 2>&1 || return 1
   while true; do
     queued_android_job_exists || { sleep 30; continue; }
