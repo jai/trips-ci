@@ -11,6 +11,7 @@ cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+[[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
 if [[ "$request" == *'/actions/runs?'* ]]; then
   print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
 elif [[ "$request" == *'/actions/runs/101/jobs?'* ]]; then
@@ -80,6 +81,9 @@ fi
 if [[ "$1" == list ]]; then
   exit 0
 fi
+if [[ "$1" == clone && "${FAKE_CLONE_FAILURE:-false}" == true ]]; then
+  exit 42
+fi
 exit 0
 SCRIPT
 chmod 700 "$fake_lima"
@@ -96,6 +100,7 @@ export TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS=0.1
 export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS=10
 export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS=4
 export TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS=1
+export TRIPS_LINUX_LIMA_SELECTION_LOCK_OWNER_GRACE_SECONDS=1
 source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 mkdir -p "$LIMA_HOME"
 installation_token_value=test-token
@@ -125,6 +130,17 @@ if workflow_run_oldest_queued_job_timestamp jai/tonegate 101 | /usr/bin/grep -q 
   exit 1
 fi
 
+export FAKE_GH_REQUEST_LOG="${test_directory}/gh-requests.log"
+export FAKE_SCENARIO=standard
+: > "$FAKE_GH_REQUEST_LOG"
+assert_equal 2026-08-25T00:00:01Z "$(repository_oldest_queued_job_timestamp jai/tonegate)"
+assert_equal 1 "$(/usr/bin/grep -c '/actions/runs?' "$FAKE_GH_REQUEST_LOG")"
+if /usr/bin/grep -q 'status=in_progress' "$FAKE_GH_REQUEST_LOG"; then
+  print -u2 -- 'Expected queue discovery to stop before scanning in-progress runs'
+  exit 1
+fi
+unset FAKE_GH_REQUEST_LOG
+
 if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
   print -u2 -- 'Expected the public trips-ci repository to stay off private self-hosted runners'
   exit 1
@@ -146,16 +162,94 @@ repository_oldest_queued_job_timestamp() {
   print -r -- "$queued_at"
 }
 next_repository
+assert_equal jai/tonegate "$selected_repository"
+release_selection_lock
+repository_scan_start_index=2
+next_repository
 assert_equal jai/trips-api "$selected_repository"
+release_selection_lock
+repository_scan_start_index=1
+tonegate_queued_at=""
+next_repository
+assert_equal jai/trips-api "$selected_repository"
+release_selection_lock
 api_queued_at=""
 next_repository
 assert_equal jai/trips-frontend "$selected_repository"
-tonegate_queued_at=""
+release_selection_lock
 frontend_queued_at=""
 if next_repository; then
   print -u2 -- 'Expected no queued Linux repository'
   exit 1
 fi
+
+tonegate_queued_at=2026-08-25T00:03:00Z
+api_queued_at=2026-08-25T00:01:00Z
+frontend_queued_at=2026-08-25T00:02:00Z
+repository_scan_start_index=1
+selection_lock_path jai/tonegate
+reserved_tonegate_lock="$REPLY"
+mkdir "$reserved_tonegate_lock"
+print -r -- $$ > "${reserved_tonegate_lock}/pid"
+next_repository
+assert_equal jai/trips-api "$selected_repository"
+release_selection_lock
+rm -rf "$reserved_tonegate_lock"
+
+selection_lock_path jai/tonegate
+stale_tonegate_lock="$REPLY"
+mkdir "$stale_tonegate_lock"
+print -r -- 999999 > "${stale_tonegate_lock}/pid"
+repository_scan_start_index=1
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+assert_equal "$stale_tonegate_lock" "$selected_repository_lock"
+release_selection_lock
+
+selection_lock_path jai/tonegate
+ownerless_tonegate_lock="$REPLY"
+mkdir "$ownerless_tonegate_lock"
+/usr/bin/touch -t 200001010000 "$ownerless_tonegate_lock"
+acquire_selection_lock jai/tonegate
+assert_equal "$ownerless_tonegate_lock" "$selected_repository_lock"
+release_selection_lock
+
+acquire_selection_lock jai/tonegate
+typeset production_repository_is_private="${functions[repository_is_private]}"
+repository_is_private() { return 0; }
+export FAKE_CLONE_FAILURE=true
+if run_one_ephemeral_runner jai/tonegate; then
+  print -u2 -- 'Expected a clone failure to fail the runner cycle'
+  exit 1
+fi
+unset FAKE_CLONE_FAILURE
+functions[repository_is_private]="$production_repository_is_private"
+if [[ -n "$selected_repository_lock" || -d "$ownerless_tonegate_lock" ]]; then
+  print -u2 -- 'Expected a clone failure to release its repository reservation'
+  exit 1
+fi
+
+concurrent_lock_home="${test_directory}/concurrent-locks"
+concurrent_selection_output="${test_directory}/concurrent-selections"
+mkdir "$concurrent_lock_home"
+for concurrent_slot in a b; do
+  env \
+    TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+    TRIPS_LINUX_LIMA_SLOT="$concurrent_slot" \
+    LIMA_HOME="$concurrent_lock_home" \
+    TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
+    /bin/zsh -c '
+      source "$1"
+      repository_oldest_queued_job_timestamp() { print -r -- 2026-08-25T00:00:00Z; }
+      next_repository
+      print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
+      /bin/sleep 0.2
+      release_selection_lock
+    ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh" "$concurrent_selection_output" &
+done
+wait
+assert_equal $'slot=a selected=jai/tonegate\nslot=b selected=jai/trips-api' \
+  "$(LC_ALL=C /usr/bin/sort "$concurrent_selection_output")"
 
 repository_oldest_queued_job_timestamp() { return 2; }
 if next_repository; then
@@ -171,34 +265,24 @@ typeset -ga observed_selection_lock_states=()
 typeset -ga observed_selection_sleep_durations=()
 selection_sleep() {
   observed_selection_sleep_durations+=("$1")
-  if [[ -d "$selection_lock" ]]; then
+  if [[ -n "$selected_repository_lock" && -d "$selected_repository_lock" ]]; then
     observed_selection_lock_states+=(locked)
   else
     observed_selection_lock_states+=(unlocked)
   fi
 }
 
-acquire_selection_lock
 observed_selection_lock_states=()
 observed_selection_sleep_durations=()
 handle_no_selected_repository 1
-assert_equal locked "${observed_selection_lock_states[1]}"
+assert_equal unlocked "${observed_selection_lock_states[1]}"
 assert_equal 120 "${observed_selection_sleep_durations[1]}"
-if [[ -d "$selection_lock" ]]; then
-  print -u2 -- 'Expected an empty healthy scan to release the selection lock after idle sleep'
-  exit 1
-fi
 
-acquire_selection_lock
 observed_selection_lock_states=()
 observed_selection_sleep_durations=()
 handle_no_selected_repository 2
 assert_equal unlocked "${observed_selection_lock_states[1]}"
 assert_equal 60 "${observed_selection_sleep_durations[1]}"
-if [[ -d "$selection_lock" ]]; then
-  print -u2 -- 'Expected a failed queue scan to release the selection lock before backoff'
-  exit 1
-fi
 functions[selection_sleep]="$production_selection_sleep"
 
 runner_lookup 'jai/tonegate' 'page-two-runner'
