@@ -29,6 +29,7 @@ readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-120}"
 readonly scan_failure_backoff_seconds="${TRIPS_LINUX_LIMA_SCAN_FAILURE_BACKOFF_SECONDS:-60}"
 readonly selection_lock_owner_grace_seconds="${TRIPS_LINUX_LIMA_SELECTION_LOCK_OWNER_GRACE_SECONDS:-10}"
+readonly clone_timeout_seconds="${TRIPS_LINUX_LIMA_CLONE_TIMEOUT_SECONDS:-300}"
 readonly package_manager_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS:-300}"
 readonly package_manager_poll_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS:-2}"
 readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS:-15}"
@@ -624,7 +625,7 @@ run_one_ephemeral_runner() {
     # the controller is interrupted, so arm cleanup before invoking clone.
     vm_cleanup_required=true
     log "cloning ${base_vm} to ${vm_name} for ${repository}"
-    "$lima_cli" clone "$base_vm" "$vm_name" \
+    run_with_timeout "$clone_timeout_seconds" "$lima_cli" clone "$base_vm" "$vm_name" \
       --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
 
     wait_for_guest_package_manager "$vm_name" || return 1
