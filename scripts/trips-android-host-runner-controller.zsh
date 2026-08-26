@@ -62,6 +62,8 @@ work_volume_mounted() {
 prepare_work_root() {
   work_volume_mounted || return 1
   cd "$work_volume" || return 1
+  work_volume_mounted || return 1
+  [[ "$PWD" == "$work_volume" ]] || return 1
   mkdir -p "$work_root_relative" || return 1
   [[ -d "$work_root_relative" && -w "$work_root_relative" ]]
 }
