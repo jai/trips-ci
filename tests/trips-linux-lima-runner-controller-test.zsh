@@ -279,6 +279,56 @@ assert_equal jai/tonegate "${clone_failure_cleanup[1]}"
   exit 1
 }
 
+clone_signal_home="${test_directory}/clone-signal-home"
+clone_signal_started="${test_directory}/clone-signal-started"
+clone_signal_cleanup="${test_directory}/clone-signal-cleanup"
+clone_signal_runner="${test_directory}/clone-signal-runner"
+cat > "$clone_signal_runner" <<SCRIPT
+#!/bin/zsh
+set -u
+export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
+export TRIPS_LINUX_LIMA_SLOT=a
+export LIMA_HOME='${clone_signal_home}'
+export TRIPS_LINUX_LIMA_CLI=fake_lima
+source '${repo_root}/scripts/trips-linux-lima-runner-controller.zsh'
+mkdir -p "\$LIMA_HOME"
+repository_is_private() { return 0; }
+fake_lima() {
+  if [[ "\$1" == clone ]]; then
+    print -r -- started > '${clone_signal_started}'
+    while true; do /bin/sleep 0.05; done
+  fi
+  return 0
+}
+cleanup_runner_vm() { print -r -- cleaned > '${clone_signal_cleanup}'; }
+acquire_selection_lock jai/tonegate
+run_one_ephemeral_runner jai/tonegate
+SCRIPT
+chmod 700 "$clone_signal_runner"
+"$clone_signal_runner" &
+clone_signal_pid=$!
+for _ in {1..200}; do
+  [[ -e "$clone_signal_started" ]] && break
+  /bin/sleep 0.01
+done
+if [[ ! -e "$clone_signal_started" ]]; then
+  print -u2 -- 'Expected the clone signal test to enter Lima clone'
+  exit 1
+fi
+/bin/kill -TERM "$clone_signal_pid"
+clone_signal_status=0
+wait "$clone_signal_pid" 2>/dev/null || clone_signal_status=$?
+assert_equal 130 "$clone_signal_status"
+if [[ ! -e "$clone_signal_cleanup" ]]; then
+  print -u2 -- 'Expected SIGTERM during clone to clean the partial VM'
+  exit 1
+fi
+selection_lock_path jai/tonegate
+if [[ -d "${clone_signal_home}/${REPLY:t}" ]]; then
+  print -u2 -- 'Expected SIGTERM during clone to release the repository reservation'
+  exit 1
+fi
+
 concurrent_lock_home="${test_directory}/concurrent-locks"
 concurrent_selection_output="${test_directory}/concurrent-selections"
 mkdir "$concurrent_lock_home"

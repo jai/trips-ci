@@ -601,32 +601,32 @@ wait_for_guest_package_manager() {
 
 run_one_ephemeral_runner() {
   local repository="$1" suffix vm_name token runner_name runner_pid runner_status
+  local vm_cleanup_required=false
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-${slot}-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   runner_pid=""
   runner_status=1
 
-  if ! repository_is_private "$repository"; then
-    log "refusing non-private or unavailable repository ${repository}"
-    release_selection_lock
-    return 1
-  fi
-
-  log "cloning ${base_vm} to ${vm_name} for ${repository}"
-  "$lima_cli" clone "$base_vm" "$vm_name" \
-    --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || {
-    release_selection_lock
-    cleanup_runner_vm "$repository" "$runner_name" "$vm_name" || true
-    return 1
-  }
-
   cleanup() {
+    [[ "$vm_cleanup_required" == true ]] || return 0
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
   trap 'stop_active_timeout; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
+    if ! repository_is_private "$repository"; then
+      log "refusing non-private or unavailable repository ${repository}"
+      return 1
+    fi
+
+    # Lima can leave a partially created VM even when clone exits non-zero or
+    # the controller is interrupted, so arm cleanup before invoking clone.
+    vm_cleanup_required=true
+    log "cloning ${base_vm} to ${vm_name} for ${repository}"
+    "$lima_cli" clone "$base_vm" "$vm_name" \
+      --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
+
     wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
