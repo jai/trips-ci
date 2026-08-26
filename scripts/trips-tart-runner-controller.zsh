@@ -13,7 +13,9 @@ readonly base_memory_mb="${TRIPS_TART_BASE_MEMORY_MB:-16384}"
 readonly runner_root="/Users/admin/actions-runner"
 readonly runner_host_label="${TRIPS_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
 readonly runner_name_prefix="${TRIPS_TART_RUNNER_NAME_PREFIX:-${runner_host_label}}"
-readonly runner_labels="${runner_host_label},tart,ios"
+# Host placement is controller-owned. GitHub workflows use durable capability
+# labels so another eligible Borg controller can claim a job after host failure.
+readonly runner_labels="${TRIPS_TART_RUNNER_LABELS:-tart,ios}"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
 readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
@@ -233,13 +235,11 @@ workflow_run_oldest_queued_job_timestamp() {
     --paginate --slurp \
     "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
     /usr/bin/python3 -c 'import json,sys
-host=sys.argv[1].lower()
 required={"self-hosted","macos","arm64","tart","ios"}
-allowed=required|{host}
 pages=json.load(sys.stdin)
 jobs=[job for page in pages for job in page.get("jobs",[])]
-matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and required <= {str(label).lower() for label in job.get("labels",[])} <= allowed and job.get("created_at")]
-print(min(matches) if matches else "")' "$runner_host_label" || return 2
+matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and {str(label).lower() for label in job.get("labels",[])} == required and job.get("created_at")]
+print(min(matches) if matches else "")' || return 2
 }
 
 repository_oldest_queued_job_timestamp() {
