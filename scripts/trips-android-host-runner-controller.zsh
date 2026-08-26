@@ -9,11 +9,13 @@ readonly runner_root="${TRIPS_ANDROID_RUNNER_ROOT:-/Users/jai/.local/share/trips
 readonly work_root="${TRIPS_ANDROID_WORK_ROOT:-/Volumes/RunnerWork/android-host-jobs}"
 readonly sdk_root="${TRIPS_ANDROID_SDK_ROOT:-/Volumes/RunnerWork/android-sdk}"
 readonly avd_root="${TRIPS_ANDROID_AVD_ROOT:-/Volumes/RunnerWork/android-user/avd}"
+readonly work_volume="${TRIPS_ANDROID_WORK_VOLUME:-/Volumes/RunnerWork}"
 readonly lock_path="${TRIPS_ANDROID_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
 readonly controller_lock="${TRIPS_ANDROID_CONTROLLER_LOCK:-/Users/jai/Library/Logs/trips-android-host-runner/controller.lock}"
 readonly gh_cli="${TRIPS_ANDROID_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly shlock_cli="${TRIPS_ANDROID_SHLOCK_CLI:-/usr/bin/shlock}"
 readonly pgrep_cli="${TRIPS_ANDROID_PGREP_CLI:-/usr/bin/pgrep}"
+readonly mount_cli="${TRIPS_ANDROID_MOUNT_CLI:-/sbin/mount}"
 readonly minimum_free_gib="${TRIPS_ANDROID_MINIMUM_FREE_GIB:-5}"
 readonly claim_timeout_seconds="${TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_ANDROID_CLAIM_POLL_SECONDS:-2}"
@@ -40,6 +42,7 @@ release_native_lane() {
 
 android_preflight() {
   [[ "$(scutil --get ComputerName)" == "$host_label" ]] || return 1
+  work_volume_mounted || return 1
   [[ "$(df -g / | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ "$(df -g "$work_root" | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ -x "$runner_root/bin/Runner.Listener" ]] || return 1
@@ -48,6 +51,11 @@ android_preflight() {
   emulator_acceleration_healthy || return 1
   ANDROID_SDK_ROOT="$sdk_root" ANDROID_AVD_HOME="$avd_root" \
     "$sdk_root/emulator/emulator" -list-avds | grep -qx ci-android-arm64
+}
+
+work_volume_mounted() {
+  [[ "$work_root" == "$work_volume"/* ]] || return 1
+  "$mount_cli" | grep -Fq " on ${work_volume} ("
 }
 
 emulator_acceleration_healthy() {
@@ -196,12 +204,13 @@ cleanup_and_release() {
 }
 
 main() {
-  mkdir -p "${controller_lock:h}" "$work_root"
+  mkdir -p "${controller_lock:h}"
   acquire_lock "$controller_lock" || return 1
   trap 'cleanup_and_release' EXIT
   trap 'exit 143' INT TERM
   "$gh_cli" auth status >/dev/null 2>&1 || return 1
   while true; do
+    work_volume_mounted || { log 'Android external work volume is not mounted; refusing runner registration'; sleep 30; continue; }
     queued_android_job_exists || { sleep 30; continue; }
     acquire_lock "$lock_path" || { sleep 15; continue; }
     native_lock_owned=true
