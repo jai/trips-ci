@@ -196,6 +196,20 @@ assert_equal jai/trips-api "$selected_repository"
 release_selection_lock
 rm -rf "$reserved_tonegate_lock"
 
+api_queued_at=""
+frontend_queued_at=""
+mkdir "$reserved_tonegate_lock"
+print -r -- $$ > "${reserved_tonegate_lock}/pid"
+if next_repository; then
+  print -u2 -- 'Expected reservation contention to defer selection'
+  exit 1
+else
+  assert_equal 3 "$?"
+fi
+rm -rf "$reserved_tonegate_lock"
+api_queued_at=2026-08-25T00:01:00Z
+frontend_queued_at=2026-08-25T00:02:00Z
+
 selection_lock_path jai/tonegate
 stale_tonegate_lock="$REPLY"
 mkdir "$stale_tonegate_lock"
@@ -387,6 +401,12 @@ observed_selection_sleep_durations=()
 handle_no_selected_repository 1
 assert_equal unlocked "${observed_selection_lock_states[1]}"
 assert_equal 120 "${observed_selection_sleep_durations[1]}"
+
+observed_selection_lock_states=()
+observed_selection_sleep_durations=()
+handle_no_selected_repository 3
+assert_equal unlocked "${observed_selection_lock_states[1]}"
+assert_equal 15 "${observed_selection_sleep_durations[1]}"
 
 observed_selection_lock_states=()
 observed_selection_sleep_durations=()

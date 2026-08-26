@@ -27,6 +27,7 @@ readonly timeout_preexec_release_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_RELEAS
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-120}"
+readonly selection_contention_backoff_seconds="${TRIPS_LINUX_LIMA_SELECTION_CONTENTION_BACKOFF_SECONDS:-15}"
 readonly scan_failure_backoff_seconds="${TRIPS_LINUX_LIMA_SCAN_FAILURE_BACKOFF_SECONDS:-60}"
 readonly selection_lock_owner_grace_seconds="${TRIPS_LINUX_LIMA_SELECTION_LOCK_OWNER_GRACE_SECONDS:-10}"
 readonly clone_timeout_seconds="${TRIPS_LINUX_LIMA_CLONE_TIMEOUT_SECONDS:-300}"
@@ -201,6 +202,7 @@ next_repository() {
   local repository queued_at
   local -i repository_count offset repository_index
   local -i lookup_status
+  local reservation_contended=false
   selected_repository=""
   repository_count=${#repository_list[@]}
   (( repository_count > 0 )) || return 1
@@ -215,12 +217,16 @@ next_repository() {
       (( lookup_status == 1 )) && continue
       return "$lookup_status"
     fi
-    acquire_selection_lock "$repository" || continue
+    if ! acquire_selection_lock "$repository"; then
+      reservation_contended=true
+      continue
+    fi
     selected_repository="$repository"
     repository_scan_start_index=$((repository_index % repository_count + 1))
     log "reserved ${repository} queue (eligible job queued ${queued_at})"
     return 0
   done
+  [[ "$reservation_contended" == true ]] && return 3
   return 1
 }
 
@@ -341,6 +347,9 @@ handle_no_selected_repository() {
   # an idle or failed scan never blocks the other slot from scanning.
   if (( scan_status == 1 )); then
     selection_sleep "$idle_scan_interval_seconds"
+  elif (( scan_status == 3 )); then
+    log "queued work is reserved by another slot; retrying in ${selection_contention_backoff_seconds} seconds"
+    selection_sleep "$selection_contention_backoff_seconds"
   else
     log "GitHub queue scan failed; retrying in ${scan_failure_backoff_seconds} seconds"
     selection_sleep "$scan_failure_backoff_seconds"
