@@ -253,7 +253,10 @@ fi
 
 acquire_selection_lock jai/tonegate
 typeset production_repository_is_private="${functions[repository_is_private]}"
+typeset production_cleanup_runner_vm="${functions[cleanup_runner_vm]}"
+typeset -ga clone_failure_cleanup=()
 repository_is_private() { return 0; }
+cleanup_runner_vm() { clone_failure_cleanup=("$1" "$2" "$3"); }
 export FAKE_CLONE_FAILURE=true
 if run_one_ephemeral_runner jai/tonegate; then
   print -u2 -- 'Expected a clone failure to fail the runner cycle'
@@ -261,10 +264,20 @@ if run_one_ephemeral_runner jai/tonegate; then
 fi
 unset FAKE_CLONE_FAILURE
 functions[repository_is_private]="$production_repository_is_private"
+functions[cleanup_runner_vm]="$production_cleanup_runner_vm"
 if [[ -n "$selected_repository_lock" || -d "$ownerless_tonegate_lock" ]]; then
   print -u2 -- 'Expected a clone failure to release its repository reservation'
   exit 1
 fi
+assert_equal jai/tonegate "${clone_failure_cleanup[1]}"
+[[ "${clone_failure_cleanup[2]}" == borg-cube-03-lima-a-* ]] || {
+  print -u2 -- 'Expected clone failure cleanup to receive the runner name'
+  exit 1
+}
+[[ "${clone_failure_cleanup[3]}" == trips-linux-runner-a-job-* ]] || {
+  print -u2 -- 'Expected clone failure cleanup to receive the partially created VM name'
+  exit 1
+}
 
 concurrent_lock_home="${test_directory}/concurrent-locks"
 concurrent_selection_output="${test_directory}/concurrent-selections"

@@ -616,9 +616,10 @@ run_one_ephemeral_runner() {
   log "cloning ${base_vm} to ${vm_name} for ${repository}"
   "$lima_cli" clone "$base_vm" "$vm_name" \
     --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || {
-      release_selection_lock
-      return 1
-    }
+    release_selection_lock
+    cleanup_runner_vm "$repository" "$runner_name" "$vm_name" || true
+    return 1
+  }
 
   cleanup() {
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
