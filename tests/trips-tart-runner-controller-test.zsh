@@ -275,7 +275,8 @@ cat > "${fake_guest_bin}/java" <<'SCRIPT'
 exit 17
 SCRIPT
 chmod 700 "${fake_guest_bin}/xcodebuild" "${fake_guest_bin}/java"
-if guest_preflight_output=$(PATH="${fake_guest_bin}:$PATH" zsh -c "$(guest_preflight_script_prefix); preflight_stage=xcode; xcodebuild -version >/dev/null; preflight_stage=java; java -version >/dev/null" 2>&1); then
+assert_equal '/opt/homebrew/bin/java -version >/dev/null 2>&1' "$(guest_preflight_java_command)"
+if guest_preflight_output=$(PATH="${fake_guest_bin}:$PATH" zsh -c "$(guest_preflight_script_prefix); preflight_stage=xcode; xcodebuild -version >/dev/null; preflight_stage=java; ${fake_guest_bin}/java -version >/dev/null" 2>&1); then
   print -u2 -- 'Expected Java guest preflight stage to fail'
   exit 1
 else
