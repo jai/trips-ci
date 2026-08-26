@@ -33,18 +33,23 @@ zsh -n \
   "$repo_root/scripts/provision-tart-runner-base.zsh" \
   "$repo_root/scripts/start-trips-linux-lima-runner.zsh" \
   "$repo_root/scripts/start-trips-tart-runner.zsh" \
+  "$repo_root/scripts/start-trips-android-tart-runner.zsh" \
   "$repo_root/scripts/trips-linux-lima-runner-controller.zsh" \
   "$repo_root/scripts/trips-tart-runner-controller.zsh" \
+  "$repo_root/scripts/trips-android-tart-runner-controller.zsh" \
   "$repo_root/tests/trips-linux-lima-runner-controller-test.zsh" \
   "$repo_root/tests/provision-tart-runner-base-test.zsh" \
-  "$repo_root/tests/trips-tart-runner-controller-test.zsh"
+  "$repo_root/tests/trips-tart-runner-controller-test.zsh" \
+  "$repo_root/tests/trips-android-tart-runner-controller-test.zsh"
 "$repo_root/tests/trips-linux-lima-runner-controller-test.zsh"
 "$repo_root/tests/provision-tart-runner-base-test.zsh"
 "$repo_root/tests/trips-tart-runner-controller-test.zsh"
+"$repo_root/tests/trips-android-tart-runner-controller-test.zsh"
 plist_files=(
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist"
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"
   "$repo_root/launchd/com.jai.trips-tart-runner.plist"
+  "$repo_root/launchd/com.jai.trips-android-tart-runner.plist"
 )
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "${plist_files[@]}"

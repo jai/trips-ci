@@ -1,0 +1,667 @@
+#!/bin/zsh
+set -u
+
+PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+readonly app_id="${TRIPS_TART_GITHUB_APP_ID:-4452026}"
+readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
+readonly repositories="${TRIPS_ANDROID_TART_REPOSITORIES:-jai/trips-frontend}"
+readonly -a repository_list=(${(s:,:)repositories})
+readonly base_vm="${TRIPS_ANDROID_TART_BASE_VM:-trips-android-runner-base}"
+readonly base_cpus="${TRIPS_ANDROID_TART_BASE_CPUS:-4}"
+readonly base_memory_mb="${TRIPS_ANDROID_TART_BASE_MEMORY_MB:-16384}"
+readonly runner_root="/Users/admin/actions-runner"
+readonly runner_host_label="${TRIPS_ANDROID_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
+readonly runner_name_prefix="${TRIPS_ANDROID_TART_RUNNER_NAME_PREFIX:-${runner_host_label}-android-tart}"
+readonly runner_labels="${runner_host_label},tart,android"
+readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+readonly ssh_key="/Users/jai/.config/trips-tart-runner/runner-controller-ed25519"
+readonly log_directory="/Users/jai/Library/Logs/trips-android-tart-runner"
+readonly work_disk_directory="${TRIPS_ANDROID_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-android-tart-runner/work-disks}"
+readonly controller_lock="${TRIPS_ANDROID_TART_CONTROLLER_LOCK:-${log_directory}/controller.lock}"
+readonly native_lane_lock="${TRIPS_TART_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
+readonly minimum_root_free_gib="${TRIPS_ANDROID_TART_MINIMUM_ROOT_FREE_GIB:-5}"
+readonly required_volume="${TRIPS_ANDROID_TART_REQUIRED_VOLUME:-}"
+readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
+readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
+readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
+readonly shlock_cli="${TRIPS_TART_SHLOCK_CLI:-/usr/bin/shlock}"
+readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
+readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
+readonly idle_scan_interval_seconds="${TRIPS_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
+readonly network_mode="${TRIPS_TART_NETWORK_MODE:-softnet}"
+readonly native_capacity_deferred_status=75
+
+typeset -g installation_token_value=""
+typeset -g installation_token_expires_at=0
+typeset -g selected_repository=""
+typeset -g native_lane_lock_owned=false
+typeset -g native_lane_release_failed=false
+typeset -g native_capacity_reason=""
+
+export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
+
+timestamp() {
+  /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+log() {
+  print -r -- "$(timestamp) $*"
+}
+
+acquire_lock() {
+  "$shlock_cli" -f "$1" -p $$
+}
+
+release_lock() {
+  local lock_path="$1" owner_pid=""
+  [[ -r "$lock_path" ]] && read -r owner_pid <"$lock_path"
+  [[ "$owner_pid" != $$ ]] || /bin/rm -f "$lock_path"
+}
+
+acquire_controller_lock() { acquire_lock "$controller_lock"; }
+release_controller_lock() { release_lock "$controller_lock"; }
+release_native_lane() {
+  [[ "$native_lane_lock_owned" == true ]] || return 0
+  release_lock "$native_lane_lock" || {
+    local release_status=$?
+    native_lane_release_failed=true
+    return "$release_status"
+  }
+  native_lane_lock_owned=false
+  native_lane_release_failed=false
+}
+
+base64url() {
+  setopt local_options pipe_fail
+  /usr/bin/openssl base64 -A | /usr/bin/tr '+/' '-_' | /usr/bin/tr -d '='
+}
+
+github_jwt() {
+  setopt local_options pipe_fail
+  local now issued_at expires_at header payload unsigned signature
+  now=$(/bin/date +%s)
+  issued_at=$((now - 60))
+  expires_at=$((now + 540))
+  header=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url) || return 1
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$issued_at" "$expires_at" "$app_id" | base64url) || return 1
+  unsigned="${header}.${payload}"
+  signature=$(printf '%s' "$unsigned" | /usr/bin/openssl dgst -sha256 -sign "$private_key" | base64url) || return 1
+  printf '%s.%s' "$unsigned" "$signature"
+}
+
+registration_token() {
+  local repository="$1" token
+  installation_token || return 1
+  token="$REPLY"
+  REPLY=$(
+    "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners/registration-token" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+  ) || return 1
+}
+
+installation_token() {
+  setopt local_options pipe_fail
+  local now jwt
+  now=$(/bin/date +%s)
+  if [[ -n "$installation_token_value" ]] && (( now < installation_token_expires_at )); then
+    REPLY="$installation_token_value"
+    return 0
+  fi
+  jwt=$(github_jwt) || return 1
+  installation_token_value=$(
+    "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X POST \
+    -H "Authorization: Bearer $jwt" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/app/installations/${installation_id}/access_tokens" |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+  ) || return 1
+  installation_token_expires_at=$((now + 480))
+  REPLY="$installation_token_value"
+}
+
+runner_lookup() {
+  local repository="$1" runner_name="$2" token page response result count
+  installation_token || return 1
+  token="$REPLY"
+  page=1
+  while true; do
+    response=$(
+      "$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+        -H "Authorization: Bearer $token" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${repository}/actions/runners?per_page=100&page=${page}"
+    ) || return 1
+    result=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
+data=json.load(sys.stdin); name=sys.argv[1]
+runner=next((r for r in data.get("runners",[]) if r.get("name") == name), None)
+print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle")) if runner else "")' "$runner_name") || return 1
+    if [[ -n "$result" ]]; then
+      REPLY="$result"
+      return 0
+    fi
+    count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("runners",[])))') || return 1
+    (( count < 100 )) && break
+    page=$((page + 1))
+  done
+  REPLY=$'\tmissing'
+}
+
+runner_busy_state() {
+  local repository="$1" runner_name="$2"
+  runner_lookup "$repository" "$runner_name" || return 1
+  REPLY="${REPLY#*$'\t'}"
+}
+
+delete_runner_registration() {
+  local repository="$1" runner_name="$2" id token
+  runner_lookup "$repository" "$runner_name" || return 0
+  id="${REPLY%%$'\t'*}"
+  [[ -n "$id" ]] || return 0
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 -X DELETE \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
+}
+
+repository_is_private() {
+  local repository="$1" token
+  installation_token || return 1
+  token="$REPLY"
+  "$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+    -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/${repository}" |
+    /usr/bin/python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("private") is True else 1)'
+}
+
+repository_workflow_runs() {
+  local repository="$1" run_status
+  for run_status in queued in_progress; do
+    "$gh_cli" api \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      --paginate \
+      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+      --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
+  done
+}
+
+workflow_run_oldest_queued_job_timestamp() {
+  setopt local_options pipe_fail
+  local repository="$1" run_id="$2"
+  "$gh_cli" api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    --paginate --slurp \
+    "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
+    /usr/bin/python3 -c 'import json,sys
+host=sys.argv[1].lower()
+required={"self-hosted","macos","arm64","tart","android"}
+allowed=required|{host}
+pages=json.load(sys.stdin)
+jobs=[job for page in pages for job in page.get("jobs",[])]
+matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and required <= {str(label).lower() for label in job.get("labels",[])} <= allowed and job.get("created_at")]
+print(min(matches) if matches else "")' "$runner_host_label" || return 2
+}
+
+repository_oldest_queued_job_timestamp() {
+  local repository="$1" runs run_id run_created_at head_repository queued_at oldest_queued_at
+  oldest_queued_at=""
+  runs=$(repository_workflow_runs "$repository") || return 2
+  while IFS=$'\t' read -r run_id run_created_at head_repository; do
+    [[ -n "$run_id" ]] || continue
+    [[ "$head_repository" == "$repository" ]] || continue
+    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
+    [[ -n "$queued_at" ]] || continue
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      oldest_queued_at="$queued_at"
+    fi
+  done <<< "$runs"
+  [[ -n "$oldest_queued_at" ]] || return 1
+  print -r -- "$oldest_queued_at"
+}
+
+wait_for_runner_claim() {
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state
+  started_at=$(/bin/date +%s)
+  while /bin/kill -0 "$runner_pid" 2>/dev/null; do
+    if runner_busy_state "$repository" "$runner_name"; then
+      state="$REPLY"
+      if [[ "$state" == busy ]]; then
+        return 0
+      fi
+    else
+      state=unknown
+      log "unable to verify ${runner_name} claim state; preserving runner"
+    fi
+    now=$(/bin/date +%s)
+    if (( now - started_at >= claim_timeout_seconds )); then
+      if [[ "$state" == idle || "$state" == missing ]]; then
+        return 2
+      fi
+    fi
+    /bin/sleep "$claim_poll_seconds"
+  done
+  return 1
+}
+
+next_repository() {
+  local repository queued_at oldest_queued_at
+  local -i lookup_status
+  selected_repository=""
+  oldest_queued_at=""
+  for repository in "${repository_list[@]}"; do
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then
+      :
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) && continue
+      return "$lookup_status"
+    fi
+    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
+      selected_repository="$repository"
+      oldest_queued_at="$queued_at"
+    fi
+  done
+  [[ -n "$selected_repository" ]]
+}
+
+delete_vm() {
+  local vm_name="$1" inventory
+  "$tart_cli" stop "$vm_name" >/dev/null 2>&1 || true
+  "$tart_cli" delete "$vm_name" >/dev/null 2>&1 || true
+  inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || {
+    log "unable to verify deletion of ${vm_name}"
+    return 1
+  }
+  if printf '%s\n' "$inventory" | /usr/bin/grep -qx "$vm_name"; then
+    log "failed to delete ${vm_name}"
+    return 1
+  fi
+}
+
+list_ephemeral_vms() {
+  local inventory vm_name
+  inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || {
+    log "unable to inventory Tart VMs"
+    return 1
+  }
+  while IFS= read -r vm_name; do
+    [[ "$vm_name" == trips-android-runner-job-* ]] && print -r -- "$vm_name"
+  done <<< "$inventory"
+  return 0
+}
+
+reconcile_startup_ephemeral_vms() {
+  local inventory rows vm_name vm_state preserved
+  preserved=false
+  inventory=$("$tart_cli" list --source local --format json 2>/dev/null) || {
+    log "unable to reconcile startup Tart VMs"
+    return 2
+  }
+  rows=$(printf '%s' "$inventory" | /usr/bin/python3 -c 'import json,sys
+for vm in json.load(sys.stdin):
+    name=str(vm.get("Name", ""))
+    if name.startswith("trips-android-runner-job-"):
+        print("{}\t{}".format(name, vm.get("State", "unknown")))') || return 2
+  while IFS=$'\t' read -r vm_name vm_state; do
+    [[ -n "$vm_name" ]] || continue
+    if [[ "$vm_state" == stopped ]]; then
+      log "removing safely stopped stale ephemeral VM ${vm_name}"
+      delete_vm "$vm_name" || return 2
+    else
+      log "preserving ${vm_name}; live state is ${vm_state:-unknown}"
+      preserved=true
+    fi
+  done <<< "$rows"
+  [[ "$preserved" == false ]]
+}
+
+native_capacity_available() {
+  local inventory
+  inventory=$("$tart_cli" list --source local --format json 2>/dev/null) || {
+    REPLY=""
+    return 2
+  }
+  REPLY=$(printf '%s' "$inventory" | /usr/bin/python3 -c 'import json,sys
+vms=json.load(sys.stdin)
+print("\n".join(str(vm.get("Name", "")) for vm in vms if vm.get("Name") and (vm.get("Running") is True or vm.get("State") != "stopped")))') || {
+    REPLY=""
+    return 2
+  }
+  [[ -z "$REPLY" ]]
+}
+
+acquire_clean_native_lane() {
+  if ! acquire_lock "$native_lane_lock"; then
+    REPLY="$native_lane_lock"
+    return 3
+  fi
+  native_lane_lock_owned=true
+  if native_capacity_available; then
+    return 0
+  else
+    local capacity_status=$?
+  fi
+  release_native_lane
+  return "$capacity_status"
+}
+
+start_tart_vm() {
+  local vm_name="$1" work_disk="$2" vm_log="$3" requested_network_mode="${4:-$network_mode}"
+  local -a network_arguments
+  network_arguments=()
+  case "$requested_network_mode" in
+    shared) ;;
+    softnet) network_arguments=(--net-softnet) ;;
+    *)
+      log "unsupported Tart network mode ${requested_network_mode}"
+      return 1
+      ;;
+  esac
+  "$tart_cli" run --no-graphics --no-audio --no-clipboard \
+    "${network_arguments[@]}" --disk="${work_disk}:sync=none" "$vm_name" >"$vm_log" 2>&1 &
+  REPLY=$!
+}
+
+runner_home_cache_setup_command() {
+  local home_root="$1" work_root="$2"
+  printf 'mkdir -p %q; rm -rf %q; ln -s %q %q' \
+    "${work_root}/maestro" \
+    "${home_root}/.maestro" \
+    "${work_root}/maestro" \
+    "${home_root}/.maestro"
+}
+
+android_guest_preflight() {
+  local vm_ip="$1"
+  /usr/bin/ssh \
+    -o BatchMode=yes \
+    -o ConnectTimeout=30 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -i "$ssh_key" \
+    "admin@${vm_ip}" \
+    "set -e; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; test \"\$(df -g /Volumes/RunnerWork | awk 'NR == 2 {print \$4}')\" -ge 5; test -x /opt/trips-android-sdk/cmdline-tools/latest/bin/sdkmanager; test -x /opt/trips-android-sdk/emulator/emulator; java -version >/dev/null 2>&1; /opt/trips-android-sdk/emulator/emulator -accel-check | grep -Eq 'WHPX|HVF|KVM|accel'; mkdir -p /Volumes/RunnerWork/android-sdk /Volumes/RunnerWork/android-user /Volumes/RunnerWork/gradle /Volumes/RunnerWork/maestro /Volumes/RunnerWork/android-logs; test -d /opt/trips-android-sdk/platform-tools; ditto /opt/trips-android-sdk /Volumes/RunnerWork/android-sdk; ln -sfn /Volumes/RunnerWork/android-user /Users/admin/.android; test -x /Volumes/RunnerWork/android-sdk/emulator/emulator; ANDROID_SDK_ROOT=/Volumes/RunnerWork/android-sdk ANDROID_AVD_HOME=/Volumes/RunnerWork/android-user/avd /Volumes/RunnerWork/android-sdk/emulator/emulator -list-avds | grep -qx ci-android-arm64"
+}
+
+cleanup_runner_vm() {
+  local repository="$1" runner_name="$2" vm_name="$3" work_disk="$4"
+  log "deleting ${vm_name}"
+  delete_vm "$vm_name" || return 1
+  /bin/rm -f "$work_disk" || return 1
+  delete_runner_registration "$repository" "$runner_name" || true
+}
+
+resolve_runner_status() {
+  local claim_result="$1" runner_pid="$2" runner_name="$3"
+  REPLY=1
+  case "$claim_result" in
+    0)
+      log "${runner_name} claimed a job"
+      REPLY=0
+      wait "$runner_pid" || REPLY=1
+      ;;
+    1)
+      REPLY=0
+      wait "$runner_pid" || REPLY=1
+      ;;
+    2)
+      log "${runner_name} remained idle; removing it"
+      /bin/kill "$runner_pid" 2>/dev/null || true
+      wait "$runner_pid" >/dev/null 2>&1 || true
+      REPLY=0
+      ;;
+    *)
+      log "unexpected runner claim result ${claim_result}"
+      return 1
+      ;;
+  esac
+}
+
+runner_cycle_status() {
+  local operation_status="$1" cleanup_status="$2"
+  (( cleanup_status == 0 )) || return 1
+  case "$operation_status" in
+    0) return 0 ;;
+    "$native_capacity_deferred_status") return "$native_capacity_deferred_status" ;;
+    *) return 1 ;;
+  esac
+}
+
+runner_cycle_log_message() {
+  local cycle_status="$1" repository="$2"
+  case "$cycle_status" in
+    0) REPLY="ephemeral runner completed a job for ${repository}" ;;
+    "$native_capacity_deferred_status")
+      REPLY="waiting for exclusive native capacity before serving ${repository}: ${native_capacity_reason}"
+      ;;
+    *) REPLY="ephemeral runner cycle failed for ${repository}; retrying in 30 seconds" ;;
+  esac
+}
+
+run_one_ephemeral_runner() {
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count lane_status cleanup_status operation_status runner_home_cache_setup
+  suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
+  vm_name="trips-android-runner-job-${suffix}"
+  runner_name="${runner_name_prefix}-${suffix}"
+  vm_log="${log_directory}/${vm_name}.log"
+  work_disk="${work_disk_directory}/${vm_name}.raw"
+  vm_pid=""
+  runner_pid=""
+  runner_status=1
+  operation_status=1
+  native_capacity_reason=""
+
+  if ! repository_is_private "$repository"; then
+    log "refusing non-private or unavailable repository ${repository}"
+    return 1
+  fi
+
+  while true; do
+    linux_runner_count=$(
+      /opt/homebrew/bin/limactl list --json 2>/dev/null |
+        /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]' |
+        /usr/bin/grep -c '^trips-linux-runner-[ab]-job-' || true
+    )
+    (( linux_runner_count <= 2 )) && break
+    log "waiting for Linux runner count to return to the two-slot contract"
+    /bin/sleep 15
+  done
+
+  if acquire_clean_native_lane; then
+    :
+  else
+    lane_status=$?
+    (( lane_status == 2 )) && return 1
+    native_capacity_reason="$REPLY"
+    return "$native_capacity_deferred_status"
+  fi
+
+  log "cloning ${base_vm} to ${vm_name}"
+  "$tart_cli" clone "$base_vm" "$vm_name" || {
+    release_native_lane
+    return 1
+  }
+
+  cleanup_vm() {
+    cleanup_runner_vm "$repository" "$runner_name" "$vm_name" "$work_disk"
+  }
+  trap 'cleanup_vm || exit 1; exit 130' INT TERM
+
+  {
+    while true; do
+      "$tart_cli" set "$vm_name" --random-mac --random-serial || break
+      /usr/sbin/mkfile -n 60g "$work_disk" || break
+
+      if native_capacity_available; then
+        :
+      else
+        lane_status=$?
+        if (( lane_status == 1 )); then
+          native_capacity_reason="${(j:, :)${(f)REPLY}}"
+          log "yielding before Tart start because another native VM became active: ${native_capacity_reason}"
+          operation_status="$native_capacity_deferred_status"
+          break
+        fi
+        log "unable to verify native capacity before Tart start"
+        break
+      fi
+      log "starting ${vm_name}"
+      start_tart_vm "$vm_name" "$work_disk" "$vm_log" || break
+      vm_pid="$REPLY"
+      vm_ip=$("$tart_cli" ip "$vm_name" --wait 180) || break
+      ssh_ready=false
+      for _ in {1..60}; do
+        if /usr/bin/ssh \
+          -o BatchMode=yes \
+          -o ConnectTimeout=3 \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -i "$ssh_key" \
+          "admin@${vm_ip}" true 2>/dev/null; then
+          ssh_ready=true
+          break
+        fi
+        /bin/sleep 2
+      done
+      [[ "$ssh_ready" == true ]] || break
+      log "${vm_name} booted"
+      runner_home_cache_setup=$(runner_home_cache_setup_command /Users/admin /Volumes/RunnerWork) || break
+
+      /usr/bin/ssh \
+      -o BatchMode=yes \
+      -o ConnectTimeout=30 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -i "$ssh_key" \
+      "admin@${vm_ip}" \
+      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; ${runner_home_cache_setup}; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || break
+
+      android_guest_preflight "$vm_ip" || break
+
+      registration_token "$repository" || break
+      token="$REPLY"
+      log "registering ${runner_name} for ${repository}"
+      printf '%s\n' "$token" | /usr/bin/ssh \
+      -o BatchMode=yes \
+      -o ConnectTimeout=30 \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=4 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -i "$ssh_key" \
+      "admin@${vm_ip}" \
+      "IFS= read -r registration_token; export PATH=/Volumes/RunnerWork/android-sdk/cmdline-tools/latest/bin:/Volumes/RunnerWork/android-sdk/platform-tools:/Volumes/RunnerWork/android-sdk/emulator:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache GRADLE_USER_HOME=/Volumes/RunnerWork/gradle ANDROID_SDK_ROOT=/Volumes/RunnerWork/android-sdk ANDROID_HOME=/Volumes/RunnerWork/android-sdk ANDROID_USER_HOME=/Volumes/RunnerWork/android-user ANDROID_AVD_HOME=/Volumes/RunnerWork/android-user/avd ANDROID_EMULATOR_HOME=/Volumes/RunnerWork/android-user; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
+      runner_pid=$!
+      wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
+      local claim_result=$?
+      resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || break
+      runner_status="$REPLY"
+      operation_status="$runner_status"
+      break
+    done
+  } always {
+    trap - INT TERM
+    cleanup_status=0
+    cleanup_vm || cleanup_status=$?
+    [[ -z "$vm_pid" ]] || wait "$vm_pid" >/dev/null 2>&1 || true
+    release_native_lane || cleanup_status=$?
+  }
+  runner_cycle_status "$operation_status" "$cleanup_status"
+}
+
+main() {
+  local repository stale_vms
+  local -i scan_status
+  umask 077
+  mkdir -p "$log_directory"
+  if ! acquire_controller_lock; then
+    log "another Android runner controller owns ${controller_lock}"
+    return 1
+  fi
+  trap 'release_native_lane; release_controller_lock' EXIT
+  if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
+    log "required volume ${required_volume} is not mounted"
+    return 1
+  fi
+  mkdir -p "$work_disk_directory"
+  if [[ ! -s "$private_key" || ! -s "$ssh_key" ]]; then
+    log "required runner credential is missing"
+    return 1
+  fi
+  if ! "$gh_cli" auth status >/dev/null 2>&1; then
+    log "GitHub CLI authentication is unavailable"
+    return 1
+  fi
+  for repository in ${(s:,:)repositories}; do
+    if ! repository_is_private "$repository"; then
+      log "refusing non-private or unavailable repository ${repository}"
+      return 1
+    fi
+  done
+  if ! "$tart_cli" list --source local --quiet | /usr/bin/grep -qx "${base_vm}"; then
+    log "base VM ${base_vm} is missing"
+    return 1
+  fi
+  if [[ "$base_cpus" != 4 || "$base_memory_mb" != 16384 ]]; then
+    log "resource contract requires 4 CPUs and 16384 MB for Android"
+    return 1
+  fi
+  if ! "$tart_cli" set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
+    log "failed to apply the Android base resource contract"
+    return 1
+  fi
+
+  reconcile_startup_ephemeral_vms || return 1
+  for stale_disk in "${work_disk_directory}"/trips-android-runner-job-*.raw(N); do
+    log "removing stale ephemeral work disk ${stale_disk:t}"
+    /bin/rm -f "$stale_disk" || return 1
+  done
+
+  while true; do
+    if next_repository; then
+      repository="$selected_repository"
+      run_one_ephemeral_runner "$repository"
+      scan_status=$?
+      if [[ "$native_lane_release_failed" == true ]]; then
+        log "native-lane unlock failed; terminating controller for supervised recovery"
+        return 1
+      fi
+      runner_cycle_log_message "$scan_status" "$repository"
+      log "$REPLY"
+      case "$scan_status" in
+        0) ;;
+        "$native_capacity_deferred_status")
+          /bin/sleep "$idle_scan_interval_seconds"
+          ;;
+        *)
+          /bin/sleep 30
+          ;;
+      esac
+    else
+      scan_status=$?
+      if (( scan_status == 1 )); then
+        /bin/sleep "$idle_scan_interval_seconds"
+      else
+        log "GitHub queue scan failed; retrying in 15 seconds"
+        /bin/sleep 15
+      fi
+    fi
+  done
+}
+
+if [[ "${TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY:-false}" != true ]]; then
+  main
+fi
