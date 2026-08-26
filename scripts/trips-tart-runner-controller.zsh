@@ -155,7 +155,7 @@ print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle") + "
   REPLY=$'\tmissing'
 }
 
-runner_has_expected_labels() {
+runner_label_state() {
   local label_csv="$1" label
   local -A expected_labels observed_labels
   expected_labels=()
@@ -166,13 +166,27 @@ runner_has_expected_labels() {
   for label in ${(s:,:)label_csv}; do
     [[ -n "$label" ]] || continue
     label="${(L)label}"
-    [[ -n "${expected_labels[$label]-}" ]] || return 1
+    if [[ -z "${expected_labels[$label]-}" ]]; then
+      REPLY=unexpected
+      return 1
+    fi
     observed_labels[$label]=1
   done
-  (( ${#expected_labels} == ${#observed_labels} )) || return 1
+  if (( ${#expected_labels} != ${#observed_labels} )); then
+    REPLY=pending
+    return 1
+  fi
   for label in ${(k)expected_labels}; do
-    [[ -n "${observed_labels[$label]-}" ]] || return 1
+    if [[ -z "${observed_labels[$label]-}" ]]; then
+      REPLY=pending
+      return 1
+    fi
   done
+  REPLY=ready
+}
+
+runner_has_expected_labels() {
+  runner_label_state "$1" && [[ "$REPLY" == ready ]]
 }
 
 runner_busy_state() {
@@ -180,9 +194,12 @@ runner_busy_state() {
   runner_lookup "$repository" "$runner_name" || return 1
   lookup="$REPLY"
   labels="${lookup##*$'\t'}"
-  runner_has_expected_labels "$labels" || {
-    REPLY=label-mismatch
-    return 3
+  runner_label_state "$labels" || {
+    case "$REPLY" in
+      pending) REPLY=label-pending; return 3 ;;
+      unexpected) REPLY=label-unexpected; return 4 ;;
+      *) return 1 ;;
+    esac
   }
   REPLY="${lookup#*$'\t'}"
   REPLY="${REPLY%%$'\t'*}"
@@ -260,7 +277,7 @@ repository_oldest_queued_job_timestamp() {
 }
 
 wait_for_runner_claim() {
-  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state lookup_status
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state lookup_status label_mismatch_reported=false
   started_at=$(/bin/date +%s)
   while /bin/kill -0 "$runner_pid" 2>/dev/null; do
     if runner_busy_state "$repository" "$runner_name"; then
@@ -271,16 +288,27 @@ wait_for_runner_claim() {
     else
       lookup_status=$?
       if (( lookup_status == 3 )); then
+        state=label-mismatch
+        if [[ "$label_mismatch_reported" == false ]]; then
+          log "${runner_name} labels are still propagating; waiting for the canonical label set"
+          label_mismatch_reported=true
+        fi
+      elif (( lookup_status == 4 )); then
         log "${runner_name} registered with unexpected runner labels"
-        return 3
+        return 4
+      else
+        state=unknown
+        log "unable to verify ${runner_name} claim state; preserving runner"
       fi
-      state=unknown
-      log "unable to verify ${runner_name} claim state; preserving runner"
     fi
     now=$(/bin/date +%s)
     if (( now - started_at >= claim_timeout_seconds )); then
       if [[ "$state" == idle || "$state" == missing ]]; then
         return 2
+      fi
+      if [[ "$state" == label-mismatch ]]; then
+        log "${runner_name} did not expose the canonical label set before claim timeout"
+        return 3
       fi
     fi
     /bin/sleep "$claim_poll_seconds"
