@@ -8,7 +8,8 @@ readonly host_label="${TRIPS_ANDROID_HOST_LABEL:-borg-cube-03}"
 readonly runner_root="${TRIPS_ANDROID_RUNNER_ROOT:-/Users/jai/.local/share/trips-android-host-runner/actions-runner}"
 readonly work_root="${TRIPS_ANDROID_WORK_ROOT:-/Volumes/RunnerWork/android-host-jobs}"
 readonly sdk_root="${TRIPS_ANDROID_SDK_ROOT:-/Volumes/RunnerWork/android-sdk}"
-readonly avd_root="${TRIPS_ANDROID_AVD_ROOT:-/Volumes/RunnerWork/android-user/avd}"
+readonly android_user_home="${TRIPS_ANDROID_USER_HOME:-/Volumes/RunnerWork/android-user}"
+readonly avd_root="${TRIPS_ANDROID_AVD_ROOT:-${android_user_home}/.android/avd}"
 readonly work_volume="${TRIPS_ANDROID_WORK_VOLUME:-/Volumes/RunnerWork}"
 readonly work_root_relative="${work_root#${work_volume}/}"
 readonly lock_path="${TRIPS_ANDROID_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
@@ -48,6 +49,7 @@ android_preflight() {
   [[ "$(df -g "$work_root_relative" | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ -x "$runner_root/bin/Runner.Listener" ]] || return 1
   [[ -x "$sdk_root/emulator/emulator" && -x "$sdk_root/platform-tools/adb" ]] || return 1
+  [[ -d "$android_user_home" && -w "$android_user_home" && -d "$avd_root" && -w "$avd_root" ]] || return 1
   java -version >/dev/null 2>&1 || return 1
   emulator_acceleration_healthy || return 1
   ANDROID_SDK_ROOT="$sdk_root" ANDROID_AVD_HOME="$avd_root" \
@@ -183,7 +185,7 @@ run_one_job() {
     cd "$job_root/runner" || exit 1
     IFS= read -r token
     export TMPDIR="$job_root_absolute/tmp" npm_config_cache="$job_root_absolute/npm" GRADLE_USER_HOME="$job_root_absolute/gradle"
-    export ANDROID_SDK_ROOT="$sdk_root" ANDROID_HOME="$sdk_root" ANDROID_AVD_HOME="$avd_root" ANDROID_USER_HOME="${avd_root:h}"
+    export ANDROID_SDK_ROOT="$sdk_root" ANDROID_HOME="$sdk_root" ANDROID_AVD_HOME="$avd_root" ANDROID_USER_HOME="$android_user_home"
     ./config.sh --unattended --ephemeral --disableupdate --url "https://github.com/${repository}" --token "$token" --name "$runner_name" --labels "${host_label},android" --work "$job_root_absolute/work" || exit $?
     ./run.sh
   ) &
