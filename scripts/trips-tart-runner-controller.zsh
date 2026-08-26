@@ -403,7 +403,7 @@ start_tart_vm() {
       ;;
   esac
   "$tart_cli" run --no-graphics --no-audio --no-clipboard \
-    "${network_arguments[@]}" --disk="${work_disk}:sync=none" "$vm_name" >"$vm_log" 2>&1 &
+    "${network_arguments[@]}" --disk="$work_disk" "$vm_name" >"$vm_log" 2>&1 &
   REPLY=$!
 }
 

@@ -462,11 +462,11 @@ assert_configured_network_invocation() {
 }
 
 assert_configured_network_invocation unset default-vm \
-  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/default-vm.raw"':sync=none default-vm'
+  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/default-vm.raw"' default-vm'
 assert_configured_network_invocation shared shared-vm \
-  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/shared-vm.raw"':sync=none shared-vm'
+  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/shared-vm.raw"' shared-vm'
 assert_configured_network_invocation softnet softnet-vm \
-  'run --no-graphics --no-audio --no-clipboard --net-softnet --disk='"${test_directory}/softnet-vm.raw"':sync=none softnet-vm'
+  'run --no-graphics --no-audio --no-clipboard --net-softnet --disk='"${test_directory}/softnet-vm.raw"' softnet-vm'
 
 if start_tart_vm 'invalid-vm' "${test_directory}/invalid.raw" "${test_directory}/invalid.log" unsupported; then
   print -u2 -- 'Expected an unsupported Tart network mode to fail closed'
