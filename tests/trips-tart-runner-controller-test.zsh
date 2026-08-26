@@ -290,6 +290,10 @@ assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
 assert_equal idle "$REPLY"
 runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'
+runner_label_state 'self-hosted,macos,arm64,tart'
+assert_equal pending "$REPLY"
+runner_label_state 'self-hosted,macos,arm64,tart,ios,extra'
+assert_equal unexpected "$REPLY"
 if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'; then
   print -u2 -- 'Expected a runner with a physical-host label to be rejected'
   exit 1
@@ -323,6 +327,20 @@ runner_busy_state() {
 }
 wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"
 assert_equal 3 "$label_probe_count"
+kill "$fake_runner_pid" 2>/dev/null || true
+wait "$fake_runner_pid" 2>/dev/null || true
+
+(
+  sleep 3
+) &
+fake_runner_pid=$!
+runner_busy_state() { REPLY=label-unexpected; return 4; }
+if wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"; then
+  print -u2 -- 'Expected a runner with an unexpected label to fail closed'
+  exit 1
+else
+  assert_equal 4 "$?"
+fi
 kill "$fake_runner_pid" 2>/dev/null || true
 wait "$fake_runner_pid" 2>/dev/null || true
 
