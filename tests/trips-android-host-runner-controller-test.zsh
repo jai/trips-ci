@@ -101,6 +101,9 @@ TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true \
 [[ -x "$repo_root/scripts/start-trips-android-host-runner.zsh" ]]
 [[ -x "$repo_root/scripts/trips-android-host-runner-controller.zsh" ]]
 work_volume_mounted
+[[ ! -e "$test_root/work-volume/work" ]]
+prepare_work_root
+[[ -d "$test_root/work-volume/work" && -w "$test_root/work-volume/work" ]]
 if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_WORK_VOLUME="$test_root/not-mounted" TRIPS_ANDROID_WORK_ROOT="$test_root/not-mounted/work" \
   TRIPS_ANDROID_MOUNT_CLI="$fake_mount" zsh -c 'source "$1"; work_volume_mounted' zsh "$repo_root/scripts/trips-android-host-runner-controller.zsh"; then
   print -u2 -- 'an absent external Android work volume must fail closed'
@@ -152,6 +155,18 @@ if wait_for_runner_claim $$ "$test_root/work/job-unclaimed"; then
 else
   [[ $? -eq 2 ]]
 fi
+
+runner_log="$test_root/mount-loss-runner.log"
+gh_log="$test_root/mount-loss-gh.log"
+: >"$runner_log"
+: >"$gh_log"
+work_volume_mounted() { return 1; }
+if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" run_one_job; then
+  print -u2 -- 'runner creation must fail closed when the external work volume is lost'
+  exit 1
+fi
+[[ ! -s "$runner_log" && ! -s "$gh_log" ]]
+work_volume_mounted() { "$mount_cli" | grep -Fq " on ${work_volume} ("; }
 
 runner_log="$test_root/runner.log"
 gh_log="$test_root/gh.log"

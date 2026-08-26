@@ -42,7 +42,7 @@ release_native_lane() {
 
 android_preflight() {
   [[ "$(scutil --get ComputerName)" == "$host_label" ]] || return 1
-  work_volume_mounted || return 1
+  prepare_work_root || return 1
   [[ "$(df -g / | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ "$(df -g "$work_root" | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ -x "$runner_root/bin/Runner.Listener" ]] || return 1
@@ -56,6 +56,12 @@ android_preflight() {
 work_volume_mounted() {
   [[ "$work_root" == "$work_volume"/* ]] || return 1
   "$mount_cli" | grep -Fq " on ${work_volume} ("
+}
+
+prepare_work_root() {
+  work_volume_mounted || return 1
+  mkdir -p "$work_root" || return 1
+  work_volume_mounted && [[ -d "$work_root" && -w "$work_root" ]]
 }
 
 emulator_acceleration_healthy() {
@@ -151,6 +157,7 @@ cleanup_active_runner() {
 
 run_one_job() {
   local suffix job_root runner_name token runner_pid runner_status claim_status
+  prepare_work_root || return 1
   suffix="$(date -u '+%Y%m%d%H%M%S')-$$"
   job_root="${work_root}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
