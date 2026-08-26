@@ -308,6 +308,24 @@ wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"
 kill "$fake_runner_pid" 2>/dev/null || true
 wait "$fake_runner_pid" 2>/dev/null || true
 
+label_probe_count=0
+(
+  sleep 3
+) &
+fake_runner_pid=$!
+runner_busy_state() {
+  label_probe_count=$((label_probe_count + 1))
+  if (( label_probe_count < 3 )); then
+    REPLY=label-mismatch
+    return 3
+  fi
+  REPLY=busy
+}
+wait_for_runner_claim 'jai/trips-frontend' 'test-runner' "$fake_runner_pid"
+assert_equal 3 "$label_probe_count"
+kill "$fake_runner_pid" 2>/dev/null || true
+wait "$fake_runner_pid" 2>/dev/null || true
+
 (
   sleep 3
 ) &

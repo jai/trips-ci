@@ -260,7 +260,7 @@ repository_oldest_queued_job_timestamp() {
 }
 
 wait_for_runner_claim() {
-  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state lookup_status
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state lookup_status label_mismatch_reported=false
   started_at=$(/bin/date +%s)
   while /bin/kill -0 "$runner_pid" 2>/dev/null; do
     if runner_busy_state "$repository" "$runner_name"; then
@@ -271,16 +271,24 @@ wait_for_runner_claim() {
     else
       lookup_status=$?
       if (( lookup_status == 3 )); then
-        log "${runner_name} registered with unexpected runner labels"
-        return 3
+        state=label-mismatch
+        if [[ "$label_mismatch_reported" == false ]]; then
+          log "${runner_name} labels are still propagating; waiting for the canonical label set"
+          label_mismatch_reported=true
+        fi
+      else
+        state=unknown
+        log "unable to verify ${runner_name} claim state; preserving runner"
       fi
-      state=unknown
-      log "unable to verify ${runner_name} claim state; preserving runner"
     fi
     now=$(/bin/date +%s)
     if (( now - started_at >= claim_timeout_seconds )); then
       if [[ "$state" == idle || "$state" == missing ]]; then
         return 2
+      fi
+      if [[ "$state" == label-mismatch ]]; then
+        log "${runner_name} did not expose the canonical label set before claim timeout"
+        return 3
       fi
     fi
     /bin/sleep "$claim_poll_seconds"
