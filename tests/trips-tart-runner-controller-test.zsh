@@ -24,14 +24,14 @@ case "${FAKE_SCENARIO:-}" in
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
       print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
     fi
     ;;
   incompatible-host)
     if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
       print -r -- $'303\t2026-08-25T00:00:00Z\tjai/trips-frontend'
     elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/303/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","another-host"]}]}]'
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
     fi
     ;;
   no-jobs)
@@ -57,7 +57,7 @@ request="$*"
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
-  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"borg-cube-03"},{"name":"tart"},{"name":"ios"}]}]}'
+  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"tart"},{"name":"ios"}]}]}'
 else
   print -u2 -- "Unexpected curl request: ${request}"
   exit 1
@@ -286,15 +286,15 @@ assert_equal 17 "$guest_preflight_status"
 assert_equal 'guest-preflight failed stage=java status=17' "$guest_preflight_output"
 
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
-assert_equal $'4343\tidle\tself-hosted,macos,arm64,borg-cube-03,tart,ios' "$REPLY"
+assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
 assert_equal idle "$REPLY"
-runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'
-if runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'; then
-  print -u2 -- 'Expected a runner missing the Borg host label to be rejected'
+runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'
+if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'; then
+  print -u2 -- 'Expected a runner with a physical-host label to be rejected'
   exit 1
 fi
-if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios,extra'; then
+if runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios,extra'; then
   print -u2 -- 'Expected a runner with an unexpected label to be rejected'
   exit 1
 fi
@@ -496,7 +496,7 @@ fi
 
 export FAKE_SCENARIO=incompatible-host
 if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 303 | /usr/bin/grep -q .; then
-  print -u2 -- 'Expected a job with an incompatible host label to be rejected'
+  print -u2 -- 'Expected a job with a physical-host label to be rejected'
   exit 1
 fi
 
