@@ -264,6 +264,26 @@ runner_environment_setup=$(runner_environment_setup_command "$cache_work")
 runner_environment=$(env -i zsh -c "${runner_environment_setup}; print -r -- \"\$TMPDIR|\$TMP|\$TEMP|\$JAVA_TOOL_OPTIONS|\$XDG_CACHE_HOME|\$npm_config_cache\"")
 assert_equal "${cache_work}/tmp|${cache_work}/tmp|${cache_work}/tmp|-Djava.io.tmpdir=${cache_work}/java-tmp|${cache_work}/user-cache|${cache_work}/npm-cache" "$runner_environment"
 
+fake_guest_bin="${test_directory}/guest-bin"
+mkdir -p "$fake_guest_bin"
+cat > "${fake_guest_bin}/xcodebuild" <<'SCRIPT'
+#!/bin/zsh
+exit 0
+SCRIPT
+cat > "${fake_guest_bin}/java" <<'SCRIPT'
+#!/bin/zsh
+exit 17
+SCRIPT
+chmod 700 "${fake_guest_bin}/xcodebuild" "${fake_guest_bin}/java"
+if guest_preflight_output=$(PATH="${fake_guest_bin}:$PATH" zsh -c "$(guest_preflight_script_prefix); preflight_stage=xcode; xcodebuild -version >/dev/null; preflight_stage=java; java -version >/dev/null" 2>&1); then
+  print -u2 -- 'Expected Java guest preflight stage to fail'
+  exit 1
+else
+  guest_preflight_status=$?
+fi
+assert_equal 17 "$guest_preflight_status"
+assert_equal 'guest-preflight failed stage=java status=17' "$guest_preflight_output"
+
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
 assert_equal $'4343\tidle\tself-hosted,macos,arm64,borg-cube-03,tart,ios' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
