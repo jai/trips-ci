@@ -57,7 +57,7 @@ request="$*"
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
-  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false}]}'
+  print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"borg-cube-03"},{"name":"tart"},{"name":"ios"}]}]}'
 else
   print -u2 -- "Unexpected curl request: ${request}"
   exit 1
@@ -249,16 +249,34 @@ assert_equal 20 "$minimum_root_free_gib"
 
 cache_home="${test_directory}/runner-home"
 cache_work="${test_directory}/runner-work"
-mkdir -p "${cache_home}/.maestro/tests"
+mkdir -p "${cache_home}/.maestro/tests" "${cache_home}/Library/Logs/maestro"
 touch "${cache_home}/.maestro/tests/stale.log"
+touch "${cache_home}/Library/Logs/maestro/stale.log"
 eval "$(runner_home_cache_setup_command "$cache_home" "$cache_work")"
 [[ -L "${cache_home}/.maestro" ]]
+[[ -L "${cache_home}/Library/Logs/maestro" ]]
 assert_equal "${cache_work}/maestro" "$(readlink "${cache_home}/.maestro")"
+assert_equal "${cache_work}/maestro-logs" "$(readlink "${cache_home}/Library/Logs/maestro")"
 [[ -d "${cache_work}/maestro" ]]
 [[ ! -e "${cache_work}/maestro/tests/stale.log" ]]
 
+runner_environment_setup=$(runner_environment_setup_command "$cache_work")
+runner_environment=$(env -i zsh -c "${runner_environment_setup}; print -r -- \"\$TMPDIR|\$TMP|\$TEMP|\$JAVA_TOOL_OPTIONS|\$XDG_CACHE_HOME|\$npm_config_cache\"")
+assert_equal "${cache_work}/tmp|${cache_work}/tmp|${cache_work}/tmp|-Djava.io.tmpdir=${cache_work}/java-tmp|${cache_work}/user-cache|${cache_work}/npm-cache" "$runner_environment"
+
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
-assert_equal $'4343\tidle' "$REPLY"
+assert_equal $'4343\tidle\tself-hosted,macos,arm64,borg-cube-03,tart,ios' "$REPLY"
+runner_busy_state 'jai/trips-frontend' 'page-two-runner'
+assert_equal idle "$REPLY"
+runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios'
+if runner_has_expected_labels 'self-hosted,macos,arm64,tart,ios'; then
+  print -u2 -- 'Expected a runner missing the Borg host label to be rejected'
+  exit 1
+fi
+if runner_has_expected_labels 'self-hosted,macos,arm64,borg-cube-03,tart,ios,extra'; then
+  print -u2 -- 'Expected a runner with an unexpected label to be rejected'
+  exit 1
+fi
 
 (
   sleep 3
@@ -444,7 +462,7 @@ assert_configured_network_invocation() {
 }
 
 assert_configured_network_invocation unset default-vm \
-  'run --no-graphics --no-audio --no-clipboard --net-softnet --disk='"${test_directory}/default-vm.raw"':sync=none default-vm'
+  'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/default-vm.raw"':sync=none default-vm'
 assert_configured_network_invocation shared shared-vm \
   'run --no-graphics --no-audio --no-clipboard --disk='"${test_directory}/shared-vm.raw"':sync=none shared-vm'
 assert_configured_network_invocation softnet softnet-vm \
