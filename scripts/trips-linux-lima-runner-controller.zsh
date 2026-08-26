@@ -16,7 +16,7 @@ readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03
 readonly runner_labels="jai-ci,jai-ci-tonegate"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
-readonly selection_lock="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
+readonly selection_lock_prefix="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
@@ -27,7 +27,10 @@ readonly timeout_preexec_release_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_RELEAS
 readonly claim_timeout_seconds="${TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_LINUX_LIMA_IDLE_SCAN_INTERVAL_SECONDS:-120}"
+readonly selection_contention_backoff_seconds="${TRIPS_LINUX_LIMA_SELECTION_CONTENTION_BACKOFF_SECONDS:-15}"
 readonly scan_failure_backoff_seconds="${TRIPS_LINUX_LIMA_SCAN_FAILURE_BACKOFF_SECONDS:-60}"
+readonly selection_lock_owner_grace_seconds="${TRIPS_LINUX_LIMA_SELECTION_LOCK_OWNER_GRACE_SECONDS:-10}"
+readonly clone_timeout_seconds="${TRIPS_LINUX_LIMA_CLONE_TIMEOUT_SECONDS:-300}"
 readonly package_manager_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_TIMEOUT_SECONDS:-300}"
 readonly package_manager_poll_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_POLL_SECONDS:-2}"
 readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS:-15}"
@@ -35,7 +38,10 @@ readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAG
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 typeset -g selected_repository=""
+typeset -g selected_repository_lock=""
 typeset -g active_timeout_pid=""
+typeset -gi repository_scan_start_index=1
+[[ "$slot" == b ]] && repository_scan_start_index=2
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 
@@ -149,15 +155,13 @@ delete_runner_registration() {
 }
 
 repository_workflow_runs() {
-  local repository="$1" run_status
-  for run_status in queued in_progress; do
-    "$gh_cli" api \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      --paginate \
-      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
-      --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
-  done
+  local repository="$1" run_status="$2"
+  "$gh_cli" api \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    --paginate \
+    "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+    --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
 }
 
 workflow_run_oldest_queued_job_timestamp() {
@@ -176,28 +180,36 @@ print(min(matches) if matches else "")' || return 2
 }
 
 repository_oldest_queued_job_timestamp() {
-  local repository="$1" runs run_id run_created_at head_repository queued_at oldest_queued_at
-  oldest_queued_at=""
-  runs=$(repository_workflow_runs "$repository") || return 2
-  while IFS=$'\t' read -r run_id run_created_at head_repository; do
-    [[ -n "$run_id" ]] || continue
-    [[ "$head_repository" == "$repository" ]] || continue
-    queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
-    [[ -n "$queued_at" ]] || continue
-    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
-      oldest_queued_at="$queued_at"
-    fi
-  done <<< "$runs"
-  [[ -n "$oldest_queued_at" ]] || return 1
-  print -r -- "$oldest_queued_at"
+  local repository="$1" run_status runs run_id run_created_at head_repository queued_at
+  # GitHub returns each status bucket newest-first. Stop at the first eligible
+  # Linux job: selection only needs proof of work, and walking every job in
+  # every active workflow delayed runner registration by several minutes.
+  for run_status in queued in_progress; do
+    runs=$(repository_workflow_runs "$repository" "$run_status") || return 2
+    while IFS=$'\t' read -r run_id run_created_at head_repository; do
+      [[ -n "$run_id" ]] || continue
+      [[ "$head_repository" == "$repository" ]] || continue
+      queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
+      [[ -n "$queued_at" ]] || continue
+      print -r -- "$queued_at"
+      return 0
+    done <<< "$runs"
+  done
+  return 1
 }
 
 next_repository() {
-  local repository queued_at oldest_queued_at
+  local repository queued_at
+  local -i repository_count offset repository_index
   local -i lookup_status
+  local reservation_contended=false
   selected_repository=""
-  oldest_queued_at=""
-  for repository in "${repository_list[@]}"; do
+  repository_count=${#repository_list[@]}
+  (( repository_count > 0 )) || return 1
+  (( repository_scan_start_index > repository_count )) && repository_scan_start_index=1
+  for (( offset = 0; offset < repository_count; offset++ )); do
+    repository_index=$(((repository_scan_start_index + offset - 1) % repository_count + 1))
+    repository="${repository_list[$repository_index]}"
     if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then
       :
     else
@@ -205,12 +217,17 @@ next_repository() {
       (( lookup_status == 1 )) && continue
       return "$lookup_status"
     fi
-    if [[ -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ]]; then
-      selected_repository="$repository"
-      oldest_queued_at="$queued_at"
+    if ! acquire_selection_lock "$repository"; then
+      reservation_contended=true
+      continue
     fi
+    selected_repository="$repository"
+    repository_scan_start_index=$((repository_index % repository_count + 1))
+    log "reserved ${repository} queue (eligible job queued ${queued_at})"
+    return 0
   done
-  [[ -n "$selected_repository" ]]
+  [[ "$reservation_contended" == true ]] && return 3
+  return 1
 }
 
 wait_for_runner_claim() {
@@ -233,25 +250,91 @@ wait_for_runner_claim() {
   return 1
 }
 
+selection_lock_path() {
+  local repository="$1"
+  REPLY="${selection_lock_prefix}-${repository//\//-}"
+}
+
 acquire_selection_lock() {
-  local owner
-  while ! /bin/mkdir "$selection_lock" 2>/dev/null; do
-    owner="$(/bin/cat "${selection_lock}/pid" 2>/dev/null || true)"
-    if [[ "$owner" == <1-> ]] && ! /bin/kill -0 "$owner" 2>/dev/null; then
-      /bin/rm -rf "$selection_lock"
-      continue
+  local repository="$1" owner lock_path reclaim_lock_path modified_at now
+  selection_lock_path "$repository"
+  lock_path="$REPLY"
+  if ! /bin/mkdir "$lock_path" 2>/dev/null; then
+    owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
+    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+      return 1
+    elif [[ "$owner" != <1-> ]]; then
+      modified_at=$("$timeout_python" -c \
+        'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
+        "$lock_path" 2>/dev/null || print 0)
+      now=$(/bin/date +%s)
+      (( modified_at > 0 && now - modified_at >= selection_lock_owner_grace_seconds )) || return 1
     fi
-    /bin/sleep 2
-  done
-  printf '%s\n' "$$" > "${selection_lock}/pid"
+
+    # Serialize stale-lock recovery separately from the repository reservation.
+    # Without this guard, two slots can both classify the same directory as
+    # stale, and the slower slot can delete the faster slot's newly acquired
+    # reservation between its removal and mkdir.
+    reclaim_lock_path="${lock_path}.reclaim"
+    if ! /bin/mkdir "$reclaim_lock_path" 2>/dev/null; then
+      owner="$(/bin/cat "${reclaim_lock_path}/pid" 2>/dev/null || true)"
+      if [[ "$owner" == <1-> ]] && ! /bin/kill -0 "$owner" 2>/dev/null; then
+        /bin/rm -rf "$reclaim_lock_path"
+      elif [[ "$owner" != <1-> ]]; then
+        modified_at=$("$timeout_python" -c \
+          'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
+          "$reclaim_lock_path" 2>/dev/null || print 0)
+        now=$(/bin/date +%s)
+        if (( modified_at > 0 && now - modified_at >= selection_lock_owner_grace_seconds )); then
+          /bin/rm -rf "$reclaim_lock_path"
+        fi
+      fi
+      return 1
+    fi
+    printf '%s\n' "$$" > "${reclaim_lock_path}/pid" || {
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
+    }
+
+    # Re-check after winning the recovery guard: another process may have
+    # replaced the stale reservation before this process acquired the guard.
+    owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
+    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
+    fi
+    if [[ "$owner" != <1-> ]]; then
+      modified_at=$("$timeout_python" -c \
+        'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
+        "$lock_path" 2>/dev/null || print 0)
+      now=$(/bin/date +%s)
+      if (( modified_at <= 0 || now - modified_at < selection_lock_owner_grace_seconds )); then
+        /bin/rm -rf "$reclaim_lock_path"
+        return 1
+      fi
+    fi
+    /bin/rm -rf "$lock_path"
+    if ! /bin/mkdir "$lock_path" 2>/dev/null; then
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
+    fi
+    /bin/rm -rf "$reclaim_lock_path"
+  fi
+  printf '%s\n' "$$" > "${lock_path}/pid" || {
+    /bin/rm -rf "$lock_path"
+    return 1
+  }
+  selected_repository_lock="$lock_path"
 }
 
 release_selection_lock() {
   local owner
-  owner="$(/bin/cat "${selection_lock}/pid" 2>/dev/null || true)"
+  [[ -n "$selected_repository_lock" ]] || return 0
+  owner="$(/bin/cat "${selected_repository_lock}/pid" 2>/dev/null || true)"
   if [[ "$owner" == "$$" ]]; then
-    /bin/rm -rf "$selection_lock"
+    /bin/rm -rf "$selected_repository_lock"
   fi
+  selected_repository_lock=""
 }
 
 selection_sleep() {
@@ -260,15 +343,14 @@ selection_sleep() {
 
 handle_no_selected_repository() {
   local -i scan_status="$1"
-  # Keep the shared lock while idle so the second slot cannot duplicate the
-  # repository scan and exhaust the authenticated GitHub API quota. A failed
-  # scan is different: release the lock before backoff so one throttled lane
-  # cannot prevent the other lane from making progress.
+  # Repository reservations are acquired only after a queued job is found, so
+  # an idle or failed scan never blocks the other slot from scanning.
   if (( scan_status == 1 )); then
     selection_sleep "$idle_scan_interval_seconds"
-    release_selection_lock
+  elif (( scan_status == 3 )); then
+    log "queued work is reserved by another slot; retrying in ${selection_contention_backoff_seconds} seconds"
+    selection_sleep "$selection_contention_backoff_seconds"
   else
-    release_selection_lock
     log "GitHub queue scan failed; retrying in ${scan_failure_backoff_seconds} seconds"
     selection_sleep "$scan_failure_backoff_seconds"
   fi
@@ -529,27 +611,32 @@ wait_for_guest_package_manager() {
 
 run_one_ephemeral_runner() {
   local repository="$1" suffix vm_name token runner_name runner_pid runner_status
+  local vm_cleanup_required=false
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-${slot}-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
   runner_pid=""
   runner_status=1
 
-  if ! repository_is_private "$repository"; then
-    log "refusing non-private or unavailable repository ${repository}"
-    return 1
-  fi
-
-  log "cloning ${base_vm} to ${vm_name} for ${repository}"
-  "$lima_cli" clone "$base_vm" "$vm_name" \
-    --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
-
   cleanup() {
+    [[ "$vm_cleanup_required" == true ]] || return 0
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
   trap 'stop_active_timeout; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
+    if ! repository_is_private "$repository"; then
+      log "refusing non-private or unavailable repository ${repository}"
+      return 1
+    fi
+
+    # Lima can leave a partially created VM even when clone exits non-zero or
+    # the controller is interrupted, so arm cleanup before invoking clone.
+    vm_cleanup_required=true
+    log "cloning ${base_vm} to ${vm_name} for ${repository}"
+    run_with_timeout "$clone_timeout_seconds" "$lima_cli" clone "$base_vm" "$vm_name" \
+      --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
+
     wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
       bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
@@ -613,7 +700,6 @@ main() {
   done <<< "$stale_vms"
 
   while true; do
-    acquire_selection_lock
     if next_repository; then
       repository="$selected_repository"
       if run_one_ephemeral_runner "$repository"; then
