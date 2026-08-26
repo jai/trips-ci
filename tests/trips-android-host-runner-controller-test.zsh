@@ -77,6 +77,8 @@ cat >"$test_root/runner-root/config.sh" <<'SCRIPT'
 set -eu
 print -r -- config >>"$FAKE_RUNNER_LOG"
 print -r -- "gradle=$GRADLE_USER_HOME" >>"$FAKE_RUNNER_LOG"
+print -r -- "android_user=$ANDROID_USER_HOME" >>"$FAKE_RUNNER_LOG"
+print -r -- "avd=$ANDROID_AVD_HOME" >>"$FAKE_RUNNER_LOG"
 exit "${FAKE_CONFIG_EXIT:-0}"
 SCRIPT
 cat >"$test_root/runner-root/run.sh" <<'SCRIPT'
@@ -192,6 +194,8 @@ fi
 grep -qx config "$runner_log"
 gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
 [[ "$gradle_home" == "$test_root/work-volume/work/job-"*/gradle ]]
+grep -qx "android_user=/Volumes/RunnerWork/android-user" "$runner_log"
+grep -qx "avd=/Volumes/RunnerWork/android-user/.android/avd" "$runner_log"
 if grep -qx run "$runner_log"; then
   print -u2 -- 'runner execution must not start after configuration failure'
   exit 1
@@ -207,6 +211,8 @@ fi
 grep -qx config "$runner_log"
 gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
 [[ "$gradle_home" == "$test_root/work-volume/work/job-"*/gradle ]]
+grep -qx "android_user=/Volumes/RunnerWork/android-user" "$runner_log"
+grep -qx "avd=/Volumes/RunnerWork/android-user/.android/avd" "$runner_log"
 grep -qx run "$runner_log"
 grep -qx delete "$gh_log"
 
