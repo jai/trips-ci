@@ -79,7 +79,7 @@ run_one_job() {
   job_root="${work_root}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
   mkdir -p "$job_root"
-  ditto "$runner_root" "$job_root/runner" || {
+  /bin/cp -R "$runner_root" "$job_root/runner" || {
     /bin/rm -rf -- "$job_root"
     return 1
   }
