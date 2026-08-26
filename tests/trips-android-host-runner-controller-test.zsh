@@ -54,6 +54,7 @@ cat >"$test_root/runner-root/config.sh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 print -r -- config >>"$FAKE_RUNNER_LOG"
+print -r -- "gradle=$GRADLE_USER_HOME" >>"$FAKE_RUNNER_LOG"
 exit "${FAKE_CONFIG_EXIT:-0}"
 SCRIPT
 cat >"$test_root/runner-root/run.sh" <<'SCRIPT'
@@ -103,6 +104,8 @@ if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" F
   exit 1
 fi
 grep -qx config "$runner_log"
+gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
+[[ "$gradle_home" == "$test_root/work/job-"*/gradle ]]
 if grep -qx run "$runner_log"; then
   print -u2 -- 'runner execution must not start after configuration failure'
   exit 1
@@ -116,6 +119,8 @@ if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" F
   exit 1
 fi
 grep -qx config "$runner_log"
+gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
+[[ "$gradle_home" == "$test_root/work/job-"*/gradle ]]
 grep -qx run "$runner_log"
 grep -qx delete "$gh_log"
 
