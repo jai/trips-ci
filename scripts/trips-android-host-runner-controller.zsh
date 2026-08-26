@@ -17,6 +17,7 @@ readonly pgrep_cli="${TRIPS_ANDROID_PGREP_CLI:-/usr/bin/pgrep}"
 readonly minimum_free_gib="${TRIPS_ANDROID_MINIMUM_FREE_GIB:-5}"
 readonly claim_timeout_seconds="${TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_ANDROID_CLAIM_POLL_SECONDS:-2}"
+readonly termination_grace_seconds="${TRIPS_ANDROID_TERMINATION_GRACE_SECONDS:-10}"
 
 typeset -g native_lock_owned=false
 typeset -g active_runner_pid=""
@@ -50,12 +51,15 @@ android_preflight() {
 }
 
 emulator_acceleration_healthy() {
-  "$sdk_root/emulator/emulator" -accel-check 2>&1 | awk '
+  local acceleration_output
+  acceleration_output=$("$sdk_root/emulator/emulator" -accel-check 2>&1) || return 1
+  print -r -- "$acceleration_output" | awk '
     NR == 1 && /^accel:$/ { header = 1 }
     NR == 2 && /^0$/ { status = 1 }
     NR == 3 && /^Hypervisor\.Framework OS X Version [0-9.]+$/ { hypervisor = 1 }
     NR == 4 && /^accel$/ { summary = 1 }
-    END { exit !(header && status && hypervisor && summary) }
+    NR > 4 { unexpected = 1 }
+    END { exit !(NR == 4 && header && status && hypervisor && summary && !unexpected) }
   '
 }
 
@@ -82,7 +86,9 @@ delete_runner_registration() {
   "$gh_cli" api -X DELETE "repos/${repository}/actions/runners/${runner_id}" >/dev/null
 }
 
-runner_process_running() { kill -0 "$1" 2>/dev/null; }
+runner_process_running() {
+  kill -0 "$1" 2>/dev/null && /bin/ps -o stat= -p "$1" 2>/dev/null | grep -qv '^[[:space:]]*Z'
+}
 
 runner_worker_claimed() {
   "$pgrep_cli" -f "$1/runner/bin/Runner.Worker" >/dev/null 2>&1
@@ -99,6 +105,15 @@ wait_for_runner_claim() {
   return 1
 }
 
+wait_for_runner_exit() {
+  local runner_pid="$1" deadline
+  deadline=$((SECONDS + termination_grace_seconds))
+  while runner_process_running "$runner_pid"; do
+    (( SECONDS >= deadline )) && return 1
+    sleep 1
+  done
+}
+
 terminate_runner_process() {
   local runner_pid="$1" child_pid
   [[ -n "$runner_pid" ]] || return 0
@@ -106,7 +121,11 @@ terminate_runner_process() {
     [[ -n "$child_pid" ]] || continue
     terminate_runner_process "$child_pid"
   done < <("$pgrep_cli" -P "$runner_pid" 2>/dev/null || true)
-  kill -TERM "$runner_pid" 2>/dev/null || true
+  runner_process_running "$runner_pid" || return 0
+  kill -TERM "$runner_pid" 2>/dev/null || return 1
+  wait_for_runner_exit "$runner_pid" && return 0
+  kill -KILL "$runner_pid" 2>/dev/null || return 1
+  wait_for_runner_exit "$runner_pid"
 }
 
 clear_active_runner() {
@@ -116,26 +135,22 @@ clear_active_runner() {
 }
 
 cleanup_active_runner() {
-  local cleanup_status=0
-  [[ -n "$active_runner_pid" ]] && terminate_runner_process "$active_runner_pid"
-  if [[ -n "$active_runner_name" ]]; then
-    if delete_runner_registration "$active_runner_name"; then
-      :
-    else
-      cleanup_status=$?
-    fi
-  fi
-  [[ -n "$active_job_root" ]] && /bin/rm -rf -- "$active_job_root"
+  [[ -z "$active_runner_pid" ]] || terminate_runner_process "$active_runner_pid" || return 1
+  [[ -z "$active_runner_name" ]] || delete_runner_registration "$active_runner_name" || return 1
+  [[ -z "$active_job_root" ]] || /bin/rm -rf -- "$active_job_root" || return 1
   clear_active_runner
-  return "$cleanup_status"
 }
 
 run_one_job() {
-  local suffix job_root runner_name token runner_pid runner_status claim_status cleanup_status=0
+  local suffix job_root runner_name token runner_pid runner_status claim_status
   suffix="$(date -u '+%Y%m%d%H%M%S')-$$"
   job_root="${work_root}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
-  mkdir -p "$job_root"
+  mkdir -p "$job_root/tmp" "$job_root/npm" "$job_root/gradle" "$job_root/work"
+  [[ -w "$job_root/tmp" && -w "$job_root/npm" && -w "$job_root/gradle" && -w "$job_root/work" ]] || {
+    /bin/rm -rf -- "$job_root"
+    return 1
+  }
   /bin/cp -R "$runner_root" "$job_root/runner" || {
     /bin/rm -rf -- "$job_root"
     return 1
@@ -165,21 +180,25 @@ run_one_job() {
   else
     claim_status=$?
     log "Android runner did not claim a job (status ${claim_status}); terminating it"
-    terminate_runner_process "$runner_pid"
-    wait "$runner_pid" 2>/dev/null || true
     runner_status="$claim_status"
   fi
-  delete_runner_registration "$runner_name" || cleanup_status=$?
-  /bin/rm -rf -- "$job_root"
-  clear_active_runner
-  (( cleanup_status == 0 )) || return "$cleanup_status"
+  cleanup_active_runner || return 1
   return "$runner_status"
+}
+
+cleanup_and_release() {
+  if cleanup_active_runner; then
+    release_native_lane
+  else
+    log 'Android runner cleanup failed; retaining the shared native lane lock'
+  fi
+  release_lock "$controller_lock" || true
 }
 
 main() {
   mkdir -p "${controller_lock:h}" "$work_root"
   acquire_lock "$controller_lock" || return 1
-  trap 'cleanup_active_runner; release_native_lane; release_lock "$controller_lock"' EXIT
+  trap 'cleanup_and_release' EXIT
   trap 'exit 143' INT TERM
   "$gh_cli" auth status >/dev/null 2>&1 || return 1
   while true; do
@@ -192,7 +211,10 @@ main() {
       sleep 30
       continue
     fi
-    run_one_job || log 'Android one-job runner failed'
+    if ! run_one_job; then
+      log 'Android one-job runner failed'
+      [[ -z "$active_runner_pid$active_runner_name$active_job_root" ]] || return 1
+    fi
     release_native_lane
   done
 }

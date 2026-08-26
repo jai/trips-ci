@@ -11,6 +11,9 @@ case "${FAKE_ACCEL:-ok}" in
   ok) print -r -- $'accel:\n0\nHypervisor.Framework OS X Version 26.6\naccel' ;;
   header-only) print -r -- 'accel: 0' ;;
   unavailable) print -r -- $'accel:\n1\nHypervisor.Framework OS X Version 26.6\naccel' ;;
+  extra-line) print -r -- $'accel:\n0\nHypervisor.Framework OS X Version 26.6\naccel\nunexpected error' ;;
+  truncated) print -r -- $'accel:\n0\nHypervisor.Framework OS X Version 26.6' ;;
+  command-failure) print -r -- $'accel:\n0\nHypervisor.Framework OS X Version 26.6\naccel'; exit 7 ;;
 esac
 SCRIPT
 chmod 700 "$test_root/sdk/emulator/emulator"
@@ -83,6 +86,7 @@ TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true \
   TRIPS_ANDROID_WORK_ROOT="$test_root/work" \
   TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS=0 \
   TRIPS_ANDROID_CLAIM_POLL_SECONDS=0 \
+  TRIPS_ANDROID_TERMINATION_GRACE_SECONDS=0 \
   source "$repo_root/scripts/trips-android-host-runner-controller.zsh"
 [[ -x "$repo_root/scripts/start-trips-android-host-runner.zsh" ]]
 [[ -x "$repo_root/scripts/trips-android-host-runner-controller.zsh" ]]
@@ -95,10 +99,24 @@ if FAKE_ACCEL=unavailable emulator_acceleration_healthy; then
   print -u2 -- 'unavailable acceleration must fail'
   exit 1
 fi
+for failing_acceleration in extra-line truncated command-failure; do
+  if FAKE_ACCEL="$failing_acceleration" emulator_acceleration_healthy; then
+    print -u2 -- "${failing_acceleration} acceleration output must fail"
+    exit 1
+  fi
+done
 
 if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_GH_CLI=/usr/bin/true \
   zsh -c 'source "$1"; queued_android_job_exists' zsh "$repo_root/scripts/trips-android-host-runner-controller.zsh"; then
   print -u2 -- 'an empty queued-run response must not start an Android runner'
+  exit 1
+fi
+
+( trap '' TERM; while true; do sleep 1; done ) &
+stubborn_runner_pid=$!
+terminate_runner_process "$stubborn_runner_pid"
+if runner_process_running "$stubborn_runner_pid"; then
+  print -u2 -- 'runner teardown must escalate to SIGKILL after SIGTERM grace expires'
   exit 1
 fi
 if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_GH_CLI=/usr/bin/false \
@@ -161,5 +179,16 @@ grep -qx 'terminate=4242' "$cleanup_log"
 grep -qx 'delete=active-runner' "$cleanup_log"
 [[ ! -e "$active_job_root" ]]
 [[ -z "$active_runner_pid" && -z "$active_runner_name" && -z "$active_job_root" ]]
+
+active_job_root="$test_root/failed-active-job"
+mkdir -p "$active_job_root"
+active_runner_pid=""
+active_runner_name=failed-runner
+delete_runner_registration() { return 1; }
+if cleanup_active_runner; then
+  print -u2 -- 'cleanup must fail if runner deregistration fails'
+  exit 1
+fi
+[[ "$active_runner_name" == failed-runner && -d "$active_job_root" ]]
 
 print -r -- 'Android host controller checks passed.'
