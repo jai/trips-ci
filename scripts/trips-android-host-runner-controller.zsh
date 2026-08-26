@@ -9,11 +9,14 @@ readonly runner_root="${TRIPS_ANDROID_RUNNER_ROOT:-/Users/jai/.local/share/trips
 readonly work_root="${TRIPS_ANDROID_WORK_ROOT:-/Volumes/RunnerWork/android-host-jobs}"
 readonly sdk_root="${TRIPS_ANDROID_SDK_ROOT:-/Volumes/RunnerWork/android-sdk}"
 readonly avd_root="${TRIPS_ANDROID_AVD_ROOT:-/Volumes/RunnerWork/android-user/avd}"
+readonly work_volume="${TRIPS_ANDROID_WORK_VOLUME:-/Volumes/RunnerWork}"
+readonly work_root_relative="${work_root#${work_volume}/}"
 readonly lock_path="${TRIPS_ANDROID_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
 readonly controller_lock="${TRIPS_ANDROID_CONTROLLER_LOCK:-/Users/jai/Library/Logs/trips-android-host-runner/controller.lock}"
 readonly gh_cli="${TRIPS_ANDROID_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly shlock_cli="${TRIPS_ANDROID_SHLOCK_CLI:-/usr/bin/shlock}"
 readonly pgrep_cli="${TRIPS_ANDROID_PGREP_CLI:-/usr/bin/pgrep}"
+readonly mount_cli="${TRIPS_ANDROID_MOUNT_CLI:-/sbin/mount}"
 readonly minimum_free_gib="${TRIPS_ANDROID_MINIMUM_FREE_GIB:-5}"
 readonly claim_timeout_seconds="${TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_ANDROID_CLAIM_POLL_SECONDS:-2}"
@@ -40,14 +43,29 @@ release_native_lane() {
 
 android_preflight() {
   [[ "$(scutil --get ComputerName)" == "$host_label" ]] || return 1
+  prepare_work_root || return 1
   [[ "$(df -g / | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
-  [[ "$(df -g "$work_root" | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
+  [[ "$(df -g "$work_root_relative" | awk 'NR == 2 { print $4 }')" -ge "$minimum_free_gib" ]] || return 1
   [[ -x "$runner_root/bin/Runner.Listener" ]] || return 1
   [[ -x "$sdk_root/emulator/emulator" && -x "$sdk_root/platform-tools/adb" ]] || return 1
   java -version >/dev/null 2>&1 || return 1
   emulator_acceleration_healthy || return 1
   ANDROID_SDK_ROOT="$sdk_root" ANDROID_AVD_HOME="$avd_root" \
     "$sdk_root/emulator/emulator" -list-avds | grep -qx ci-android-arm64
+}
+
+work_volume_mounted() {
+  [[ "$work_root" == "$work_volume"/* && "$work_root_relative" != "$work_root" ]] || return 1
+  "$mount_cli" | grep -Fq " on ${work_volume} ("
+}
+
+prepare_work_root() {
+  work_volume_mounted || return 1
+  cd "$work_volume" || return 1
+  work_volume_mounted || return 1
+  [[ "$PWD" == "$work_volume" ]] || return 1
+  mkdir -p "$work_root_relative" || return 1
+  [[ -d "$work_root_relative" && -w "$work_root_relative" ]]
 }
 
 emulator_acceleration_healthy() {
@@ -142,15 +160,17 @@ cleanup_active_runner() {
 }
 
 run_one_job() {
-  local suffix job_root runner_name token runner_pid runner_status claim_status
+  local suffix job_root job_root_absolute runner_name token runner_pid runner_status claim_status
+  prepare_work_root || return 1
   suffix="$(date -u '+%Y%m%d%H%M%S')-$$"
-  job_root="${work_root}/job-${suffix}"
+  job_root="${work_root_relative}/job-${suffix}"
   runner_name="${host_label}-android-${suffix}"
   mkdir -p "$job_root/tmp" "$job_root/npm" "$job_root/gradle" "$job_root/work"
   [[ -w "$job_root/tmp" && -w "$job_root/npm" && -w "$job_root/gradle" && -w "$job_root/work" ]] || {
     /bin/rm -rf -- "$job_root"
     return 1
   }
+  job_root_absolute="$(cd "$job_root" && pwd)"
   /bin/cp -R "$runner_root" "$job_root/runner" || {
     /bin/rm -rf -- "$job_root"
     return 1
@@ -162,16 +182,16 @@ run_one_job() {
   print -r -- "$token" | (
     cd "$job_root/runner" || exit 1
     IFS= read -r token
-    export TMPDIR="$job_root/tmp" npm_config_cache="$job_root/npm" GRADLE_USER_HOME="$job_root/gradle"
+    export TMPDIR="$job_root_absolute/tmp" npm_config_cache="$job_root_absolute/npm" GRADLE_USER_HOME="$job_root_absolute/gradle"
     export ANDROID_SDK_ROOT="$sdk_root" ANDROID_HOME="$sdk_root" ANDROID_AVD_HOME="$avd_root" ANDROID_USER_HOME="${avd_root:h}"
-    ./config.sh --unattended --ephemeral --disableupdate --url "https://github.com/${repository}" --token "$token" --name "$runner_name" --labels "${host_label},android" --work "$job_root/work" || exit $?
+    ./config.sh --unattended --ephemeral --disableupdate --url "https://github.com/${repository}" --token "$token" --name "$runner_name" --labels "${host_label},android" --work "$job_root_absolute/work" || exit $?
     ./run.sh
   ) &
   runner_pid=$!
   active_runner_pid="$runner_pid"
   active_runner_name="$runner_name"
   active_job_root="$job_root"
-  if wait_for_runner_claim "$runner_pid" "$job_root"; then
+  if wait_for_runner_claim "$runner_pid" "$job_root_absolute"; then
     if wait "$runner_pid"; then
       runner_status=0
     else
@@ -196,12 +216,13 @@ cleanup_and_release() {
 }
 
 main() {
-  mkdir -p "${controller_lock:h}" "$work_root"
+  mkdir -p "${controller_lock:h}"
   acquire_lock "$controller_lock" || return 1
   trap 'cleanup_and_release' EXIT
   trap 'exit 143' INT TERM
   "$gh_cli" auth status >/dev/null 2>&1 || return 1
   while true; do
+    work_volume_mounted || { log 'Android external work volume is not mounted; refusing runner registration'; sleep 30; continue; }
     queued_android_job_exists || { sleep 30; continue; }
     acquire_lock "$lock_path" || { sleep 15; continue; }
     native_lock_owned=true

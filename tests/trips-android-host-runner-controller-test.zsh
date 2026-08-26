@@ -5,6 +5,7 @@ repo_root="${0:A:h:h}"
 test_root=$(mktemp -d "${repo_root}/tmp/android-host-controller.XXXXXX")
 trap '/bin/rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/sdk/emulator"
+mkdir -p "$test_root/work-volume"
 cat >"$test_root/sdk/emulator/emulator" <<'SCRIPT'
 #!/bin/zsh
 case "${FAKE_ACCEL:-ok}" in
@@ -63,6 +64,13 @@ esac
 SCRIPT
 chmod 700 "$fake_gh"
 
+fake_mount="$test_root/mount"
+cat >"$fake_mount" <<SCRIPT
+#!/bin/zsh
+print -r -- '/dev/disk99s1 on ${test_root}/work-volume (apfs, local, journaled)'
+SCRIPT
+chmod 700 "$fake_mount"
+
 mkdir -p "$test_root/runner-root"
 cat >"$test_root/runner-root/config.sh" <<'SCRIPT'
 #!/bin/zsh
@@ -83,13 +91,36 @@ TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true \
   TRIPS_ANDROID_SDK_ROOT="$test_root/sdk" \
   TRIPS_ANDROID_GH_CLI="$fake_gh" \
   TRIPS_ANDROID_RUNNER_ROOT="$test_root/runner-root" \
-  TRIPS_ANDROID_WORK_ROOT="$test_root/work" \
+  TRIPS_ANDROID_WORK_VOLUME="$test_root/work-volume" \
+  TRIPS_ANDROID_WORK_ROOT="$test_root/work-volume/work" \
+  TRIPS_ANDROID_MOUNT_CLI="$fake_mount" \
   TRIPS_ANDROID_CLAIM_TIMEOUT_SECONDS=0 \
   TRIPS_ANDROID_CLAIM_POLL_SECONDS=0 \
   TRIPS_ANDROID_TERMINATION_GRACE_SECONDS=0 \
   source "$repo_root/scripts/trips-android-host-runner-controller.zsh"
 [[ -x "$repo_root/scripts/start-trips-android-host-runner.zsh" ]]
 [[ -x "$repo_root/scripts/trips-android-host-runner-controller.zsh" ]]
+work_volume_mounted
+[[ ! -e "$test_root/work-volume/work" ]]
+prepare_work_root
+[[ -d "$test_root/work-volume/work" && -w "$test_root/work-volume/work" ]]
+[[ "$PWD" == "$test_root/work-volume" ]]
+mount_check_count=0
+work_volume_mounted() {
+  mount_check_count=$((mount_check_count + 1))
+  (( mount_check_count == 1 ))
+}
+if prepare_work_root; then
+  print -u2 -- 'work-root setup must fail if the mount disappears after entering the volume'
+  exit 1
+fi
+[[ "$mount_check_count" -eq 2 ]]
+work_volume_mounted() { "$mount_cli" | grep -Fq " on ${work_volume} ("; }
+if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_WORK_VOLUME="$test_root/not-mounted" TRIPS_ANDROID_WORK_ROOT="$test_root/not-mounted/work" \
+  TRIPS_ANDROID_MOUNT_CLI="$fake_mount" zsh -c 'source "$1"; work_volume_mounted' zsh "$repo_root/scripts/trips-android-host-runner-controller.zsh"; then
+  print -u2 -- 'an absent external Android work volume must fail closed'
+  exit 1
+fi
 FAKE_ACCEL=ok emulator_acceleration_healthy
 if FAKE_ACCEL=header-only emulator_acceleration_healthy; then
   print -u2 -- 'acceleration header without usability text must fail'
@@ -137,6 +168,18 @@ else
   [[ $? -eq 2 ]]
 fi
 
+runner_log="$test_root/mount-loss-runner.log"
+gh_log="$test_root/mount-loss-gh.log"
+: >"$runner_log"
+: >"$gh_log"
+work_volume_mounted() { return 1; }
+if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" run_one_job; then
+  print -u2 -- 'runner creation must fail closed when the external work volume is lost'
+  exit 1
+fi
+[[ ! -s "$runner_log" && ! -s "$gh_log" ]]
+work_volume_mounted() { "$mount_cli" | grep -Fq " on ${work_volume} ("; }
+
 runner_log="$test_root/runner.log"
 gh_log="$test_root/gh.log"
 : >"$runner_log"
@@ -148,7 +191,7 @@ if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" F
 fi
 grep -qx config "$runner_log"
 gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
-[[ "$gradle_home" == "$test_root/work/job-"*/gradle ]]
+[[ "$gradle_home" == "$test_root/work-volume/work/job-"*/gradle ]]
 if grep -qx run "$runner_log"; then
   print -u2 -- 'runner execution must not start after configuration failure'
   exit 1
@@ -163,7 +206,7 @@ if FAKE_GH_SCENARIO=runner FAKE_RUNNER_LOG="$runner_log" FAKE_GH_LOG="$gh_log" F
 fi
 grep -qx config "$runner_log"
 gradle_home="$(sed -n 's/^gradle=//p' "$runner_log")"
-[[ "$gradle_home" == "$test_root/work/job-"*/gradle ]]
+[[ "$gradle_home" == "$test_root/work-volume/work/job-"*/gradle ]]
 grep -qx run "$runner_log"
 grep -qx delete "$gh_log"
 
