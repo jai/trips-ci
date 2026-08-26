@@ -29,7 +29,7 @@ readonly shlock_cli="${TRIPS_TART_SHLOCK_CLI:-/usr/bin/shlock}"
 readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
-readonly network_mode="${TRIPS_TART_NETWORK_MODE:-softnet}"
+readonly network_mode="${TRIPS_TART_NETWORK_MODE:-shared}"
 readonly native_capacity_deferred_status=75
 
 typeset -g installation_token_value=""
@@ -141,7 +141,7 @@ runner_lookup() {
     result=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
 data=json.load(sys.stdin); name=sys.argv[1]
 runner=next((r for r in data.get("runners",[]) if r.get("name") == name), None)
-print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle")) if runner else "")' "$runner_name") || return 1
+print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle") + "\t" + ",".join(str(label.get("name", "")).lower() for label in runner.get("labels", []))) if runner else "")' "$runner_name") || return 1
     if [[ -n "$result" ]]; then
       REPLY="$result"
       return 0
@@ -153,10 +153,37 @@ print((str(runner["id"]) + "\t" + ("busy" if runner.get("busy") else "idle")) if
   REPLY=$'\tmissing'
 }
 
+runner_has_expected_labels() {
+  local label_csv="$1" label
+  local -A expected_labels observed_labels
+  expected_labels=()
+  observed_labels=()
+  for label in self-hosted macos arm64 ${(s:,:)runner_labels}; do
+    expected_labels[${(L)label}]=1
+  done
+  for label in ${(s:,:)label_csv}; do
+    [[ -n "$label" ]] || continue
+    label="${(L)label}"
+    [[ -n "${expected_labels[$label]-}" ]] || return 1
+    observed_labels[$label]=1
+  done
+  (( ${#expected_labels} == ${#observed_labels} )) || return 1
+  for label in ${(k)expected_labels}; do
+    [[ -n "${observed_labels[$label]-}" ]] || return 1
+  done
+}
+
 runner_busy_state() {
-  local repository="$1" runner_name="$2"
+  local repository="$1" runner_name="$2" lookup labels
   runner_lookup "$repository" "$runner_name" || return 1
-  REPLY="${REPLY#*$'\t'}"
+  lookup="$REPLY"
+  labels="${lookup##*$'\t'}"
+  runner_has_expected_labels "$labels" || {
+    REPLY=label-mismatch
+    return 3
+  }
+  REPLY="${lookup#*$'\t'}"
+  REPLY="${REPLY%%$'\t'*}"
 }
 
 delete_runner_registration() {
@@ -233,7 +260,7 @@ repository_oldest_queued_job_timestamp() {
 }
 
 wait_for_runner_claim() {
-  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state
+  local repository="$1" runner_name="$2" runner_pid="$3" started_at now state lookup_status
   started_at=$(/bin/date +%s)
   while /bin/kill -0 "$runner_pid" 2>/dev/null; do
     if runner_busy_state "$repository" "$runner_name"; then
@@ -242,6 +269,11 @@ wait_for_runner_claim() {
         return 0
       fi
     else
+      lookup_status=$?
+      if (( lookup_status == 3 )); then
+        log "${runner_name} registered with unexpected runner labels"
+        return 3
+      fi
       state=unknown
       log "unable to verify ${runner_name} claim state; preserving runner"
     fi
@@ -377,11 +409,28 @@ start_tart_vm() {
 
 runner_home_cache_setup_command() {
   local home_root="$1" work_root="$2"
-  printf 'mkdir -p %q; rm -rf %q; ln -s %q %q' \
+  printf 'mkdir -p %q %q %q; rm -rf %q %q; ln -s %q %q; ln -s %q %q' \
+    "${work_root}/maestro" \
+    "${work_root}/maestro-logs" \
+    "${home_root}/Library/Logs" \
+    "${home_root}/.maestro" \
+    "${home_root}/Library/Logs/maestro" \
     "${work_root}/maestro" \
     "${home_root}/.maestro" \
-    "${work_root}/maestro" \
-    "${home_root}/.maestro"
+    "${work_root}/maestro-logs" \
+    "${home_root}/Library/Logs/maestro"
+}
+
+runner_environment_setup_command() {
+  local work_root="$1"
+  printf 'export PATH=%q TMPDIR=%q TMP=%q TEMP=%q JAVA_TOOL_OPTIONS=%q XDG_CACHE_HOME=%q npm_config_cache=%q' \
+    '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' \
+    "${work_root}/tmp" \
+    "${work_root}/tmp" \
+    "${work_root}/tmp" \
+    "-Djava.io.tmpdir=${work_root}/java-tmp" \
+    "${work_root}/user-cache" \
+    "${work_root}/npm-cache"
 }
 
 cleanup_runner_vm() {
@@ -440,7 +489,7 @@ runner_cycle_log_message() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count lane_status cleanup_status operation_status runner_home_cache_setup
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count lane_status cleanup_status operation_status runner_home_cache_setup runner_environment_setup
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -527,6 +576,7 @@ run_one_ephemeral_runner() {
       [[ "$ssh_ready" == true ]] || break
       log "${vm_name} booted"
       runner_home_cache_setup=$(runner_home_cache_setup_command /Users/admin /Volumes/RunnerWork) || break
+      runner_environment_setup=$(runner_environment_setup_command /Volumes/RunnerWork) || break
 
       /usr/bin/ssh \
       -o BatchMode=yes \
@@ -535,7 +585,7 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; ${runner_home_cache_setup}; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || break
+      "set -e; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; test \"\$(df -g / | awk 'NR == 2 {print \$4}')\" -ge '${minimum_root_free_gib}'; root_store=\$(diskutil info / | awk -F: '/APFS Physical Store/{gsub(/ /, \"\", \$2); print \$2; exit}'); root_device=\$(printf \"%s\" \"\$root_store\" | sed -E \"s/s[0-9]+\$//\"); work_device=\$(diskutil list physical | awk '/^\\/dev\\/disk[0-9]+ /{gsub(\"/dev/\", \"\", \$1); print \$1}' | grep -v \"^\${root_device}\$\"); test \"\$(printf \"%s\\n\" \"\$work_device\" | wc -l | tr -d \" \")\" = 1; printf \"%s\\n\" \"\$root_device\" \"\$work_device\" | while IFS= read -r device; do printf \"%s\\n\" \"\$device\" | grep -Eq \"^disk[0-9]+\$\" || exit 1; done; sudo diskutil eraseDisk APFS RunnerWork GPT \"/dev/\$work_device\" >/dev/null; mkdir -p /Volumes/RunnerWork/_work /Volumes/RunnerWork/DerivedData /Volumes/RunnerWork/Archives /Volumes/RunnerWork/tmp /Volumes/RunnerWork/java-tmp /Volumes/RunnerWork/npm-cache /Volumes/RunnerWork/user-cache /Volumes/RunnerWork/core-simulator-cache /Volumes/RunnerWork/core-simulator-devices /Volumes/RunnerWork/expo /Volumes/RunnerWork/gradle /Volumes/RunnerWork/cocoapods /Volumes/RunnerWork/runner-diag /Users/admin/Library/Developer/Xcode /Users/admin/Library/Developer/CoreSimulator; test -w /Volumes/RunnerWork/tmp; test \"\$(df -g /Volumes/RunnerWork | awk 'NR == 2 {print \$4}')\" -ge 50; ${runner_home_cache_setup}; sudo rm -rf /Library/Developer/CoreSimulator/Caches; sudo ln -s /Volumes/RunnerWork/core-simulator-cache /Library/Developer/CoreSimulator/Caches; xcrun simctl runtime scan-and-mount >/dev/null; runtime_ready=false; for _ in {1..45}; do if xcrun simctl list runtimes | grep -q \"iOS\"; then runtime_ready=true; break; fi; sleep 2; done; [ \"\$runtime_ready\" = true ]; launchctl kill SIGKILL \"gui/\$(id -u)/com.apple.CoreSimulator.CoreSimulatorService\" >/dev/null 2>&1 || true; sleep 2; sudo rm -rf /Users/admin/Library/Caches || true; sudo rm -rf /Users/admin/Library/Developer/Xcode/DerivedData /Users/admin/Library/Developer/Xcode/Archives /Users/admin/Library/Developer/CoreSimulator/Devices /Users/admin/.expo /Users/admin/.gradle /Users/admin/.cocoapods /Users/admin/actions-runner/_diag; ln -s /Volumes/RunnerWork/DerivedData /Users/admin/Library/Developer/Xcode/DerivedData; ln -s /Volumes/RunnerWork/Archives /Users/admin/Library/Developer/Xcode/Archives; ln -s /Volumes/RunnerWork/core-simulator-devices /Users/admin/Library/Developer/CoreSimulator/Devices; if [ ! -e /Users/admin/Library/Caches ]; then ln -s /Volumes/RunnerWork/user-cache /Users/admin/Library/Caches; fi; ln -s /Volumes/RunnerWork/expo /Users/admin/.expo; ln -s /Volumes/RunnerWork/gradle /Users/admin/.gradle; ln -s /Volumes/RunnerWork/cocoapods /Users/admin/.cocoapods; ln -s /Volumes/RunnerWork/runner-diag /Users/admin/actions-runner/_diag" || break
 
       registration_token "$repository" || break
       token="$REPLY"
@@ -549,7 +599,7 @@ run_one_ephemeral_runner() {
       -o UserKnownHostsFile=/dev/null \
       -i "$ssh_key" \
       "admin@${vm_ip}" \
-      "IFS= read -r registration_token; export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/Volumes/RunnerWork/tmp npm_config_cache=/Volumes/RunnerWork/npm-cache; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
+      "IFS= read -r registration_token; ${runner_environment_setup}; cd '$runner_root'; ./config.sh --unattended --ephemeral --disableupdate --url 'https://github.com/${repository}' --token \"\$registration_token\" --name '$runner_name' --labels '$runner_labels' --work /Volumes/RunnerWork/_work; exec ./run.sh" &
       runner_pid=$!
       wait_for_runner_claim "$repository" "$runner_name" "$runner_pid"
       local claim_result=$?
