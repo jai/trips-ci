@@ -214,6 +214,43 @@ acquire_selection_lock jai/tonegate
 assert_equal "$ownerless_tonegate_lock" "$selected_repository_lock"
 release_selection_lock
 
+stale_contention_home="${test_directory}/stale-contention-locks"
+stale_contention_lock="${stale_contention_home}/.trips-linux-runner-selection-lock-jai-tonegate"
+stale_contention_start="${test_directory}/stale-contention-start"
+stale_contention_ready="${test_directory}/stale-contention-ready"
+stale_contention_winners="${test_directory}/stale-contention-winners"
+mkdir -p "$stale_contention_lock" "$stale_contention_ready"
+print -r -- 999999 > "${stale_contention_lock}/pid"
+: > "$stale_contention_winners"
+for contender in {1..12}; do
+  env \
+    TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+    TRIPS_LINUX_LIMA_SLOT=a \
+    LIMA_HOME="$stale_contention_home" \
+    /bin/zsh -c '
+      source "$1"
+      : > "$2/$3"
+      while [[ ! -e "$4" ]]; do /bin/sleep 0.001; done
+      if acquire_selection_lock jai/tonegate; then
+        print -r -- "$$" >> "$5"
+        /bin/sleep 0.2
+        release_selection_lock
+      fi
+    ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh" \
+      "$stale_contention_ready" "$contender" "$stale_contention_start" \
+      "$stale_contention_winners" &
+done
+while (( $(find "$stale_contention_ready" -type f | wc -l | tr -d ' ') < 12 )); do
+  /bin/sleep 0.002
+done
+: > "$stale_contention_start"
+wait
+assert_equal 1 "$(wc -l < "$stale_contention_winners" | tr -d ' ')"
+if find "$stale_contention_home" -maxdepth 1 -name '*.reclaim' | /usr/bin/grep -q .; then
+  print -u2 -- 'Expected stale-lock recovery guards to be cleaned up'
+  exit 1
+fi
+
 acquire_selection_lock jai/tonegate
 typeset production_repository_is_private="${functions[repository_is_private]}"
 repository_is_private() { return 0; }

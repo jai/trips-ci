@@ -249,27 +249,70 @@ selection_lock_path() {
 }
 
 acquire_selection_lock() {
-  local repository="$1" owner lock_path modified_at now
+  local repository="$1" owner lock_path reclaim_lock_path modified_at now
   selection_lock_path "$repository"
   lock_path="$REPLY"
-  while ! /bin/mkdir "$lock_path" 2>/dev/null; do
+  if ! /bin/mkdir "$lock_path" 2>/dev/null; then
     owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
-    if [[ "$owner" == <1-> ]] && ! /bin/kill -0 "$owner" 2>/dev/null; then
-      /bin/rm -rf "$lock_path"
-      continue
+    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+      return 1
+    elif [[ "$owner" != <1-> ]]; then
+      modified_at=$("$timeout_python" -c \
+        'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
+        "$lock_path" 2>/dev/null || print 0)
+      now=$(/bin/date +%s)
+      (( modified_at > 0 && now - modified_at >= selection_lock_owner_grace_seconds )) || return 1
+    fi
+
+    # Serialize stale-lock recovery separately from the repository reservation.
+    # Without this guard, two slots can both classify the same directory as
+    # stale, and the slower slot can delete the faster slot's newly acquired
+    # reservation between its removal and mkdir.
+    reclaim_lock_path="${lock_path}.reclaim"
+    if ! /bin/mkdir "$reclaim_lock_path" 2>/dev/null; then
+      owner="$(/bin/cat "${reclaim_lock_path}/pid" 2>/dev/null || true)"
+      if [[ "$owner" == <1-> ]] && ! /bin/kill -0 "$owner" 2>/dev/null; then
+        /bin/rm -rf "$reclaim_lock_path"
+      elif [[ "$owner" != <1-> ]]; then
+        modified_at=$("$timeout_python" -c \
+          'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
+          "$reclaim_lock_path" 2>/dev/null || print 0)
+        now=$(/bin/date +%s)
+        if (( modified_at > 0 && now - modified_at >= selection_lock_owner_grace_seconds )); then
+          /bin/rm -rf "$reclaim_lock_path"
+        fi
+      fi
+      return 1
+    fi
+    printf '%s\n' "$$" > "${reclaim_lock_path}/pid" || {
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
+    }
+
+    # Re-check after winning the recovery guard: another process may have
+    # replaced the stale reservation before this process acquired the guard.
+    owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
+    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
     fi
     if [[ "$owner" != <1-> ]]; then
       modified_at=$("$timeout_python" -c \
         'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' \
         "$lock_path" 2>/dev/null || print 0)
       now=$(/bin/date +%s)
-      if (( modified_at > 0 && now - modified_at >= selection_lock_owner_grace_seconds )); then
-        /bin/rm -rf "$lock_path"
-        continue
+      if (( modified_at <= 0 || now - modified_at < selection_lock_owner_grace_seconds )); then
+        /bin/rm -rf "$reclaim_lock_path"
+        return 1
       fi
     fi
-    return 1
-  done
+    /bin/rm -rf "$lock_path"
+    if ! /bin/mkdir "$lock_path" 2>/dev/null; then
+      /bin/rm -rf "$reclaim_lock_path"
+      return 1
+    fi
+    /bin/rm -rf "$reclaim_lock_path"
+  fi
   printf '%s\n' "$$" > "${lock_path}/pid" || {
     /bin/rm -rf "$lock_path"
     return 1
