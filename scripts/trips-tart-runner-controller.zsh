@@ -10,6 +10,7 @@ readonly -a repository_list=(${(s:,:)repositories})
 readonly base_vm="${TRIPS_TART_BASE_VM:-trips-runner-base}"
 readonly base_cpus="${TRIPS_TART_BASE_CPUS:-4}"
 readonly base_memory_mb="${TRIPS_TART_BASE_MEMORY_MB:-16384}"
+readonly allowed_coresident_vms="${TRIPS_TART_ALLOWED_CORESIDENT_VMS:-}"
 readonly runner_root="/Users/admin/actions-runner"
 readonly runner_host_label="${TRIPS_TART_RUNNER_HOST_LABEL:-borg-cube-03}"
 readonly runner_name_prefix="${TRIPS_TART_RUNNER_NAME_PREFIX:-${runner_host_label}}"
@@ -336,9 +337,10 @@ native_capacity_available() {
     REPLY=""
     return 2
   }
-  REPLY=$(printf '%s' "$inventory" | /usr/bin/python3 -c 'import json,sys
+  REPLY=$(printf '%s' "$inventory" | TRIPS_TART_ALLOWED_CORESIDENT_VMS="$allowed_coresident_vms" /usr/bin/python3 -c 'import json,os,sys
 vms=json.load(sys.stdin)
-print("\n".join(str(vm.get("Name", "")) for vm in vms if vm.get("Name") and (vm.get("Running") is True or vm.get("State") != "stopped")))') || {
+allowed={name.strip() for name in os.environ["TRIPS_TART_ALLOWED_CORESIDENT_VMS"].split(",") if name.strip()}
+print("\n".join(str(vm.get("Name", "")) for vm in vms if vm.get("Name") and vm.get("Name") not in allowed and (vm.get("Running") is True or vm.get("State") != "stopped")))') || {
     REPLY=""
     return 2
   }
