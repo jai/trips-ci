@@ -123,6 +123,7 @@ export TRIPS_TART_CLAIM_TIMEOUT_SECONDS=2
 export TRIPS_TART_CLAIM_POLL_SECONDS=0.1
 export TRIPS_TART_CONTROLLER_LOCK="${test_directory}/controller.lock"
 export TRIPS_TART_NATIVE_LANE_LOCK="${test_directory}/native-lane.lock"
+export TRIPS_TART_ALLOWED_CORESIDENT_VMS='atlas-eve-alpha'
 source "${repo_root}/scripts/trips-tart-runner-controller.zsh"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
@@ -386,6 +387,9 @@ else
   assert_equal 1 "$?"
   assert_equal tonegate-search-20260825 "$REPLY"
 fi
+export FAKE_RUNNING_VM=atlas-eve-alpha
+native_capacity_available
+assert_equal '' "$REPLY"
 export FAKE_RUNNING_VM=''
 native_capacity_available
 assert_equal '' "$REPLY"
