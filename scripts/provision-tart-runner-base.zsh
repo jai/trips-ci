@@ -24,7 +24,7 @@ base_name_is_safe() {
 }
 
 base_root_preflight_command() {
-  printf '%s' 'set -e; test "$(df -g / | awk '\''NR == 2 {print $4}'\'')" -ge "${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-5}"; xcodebuild -version >/dev/null; java -version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; xcrun simctl list runtimes | grep -q "iOS"'
+  printf '%s' 'set -e; test "$(df -g / | awk '\''NR == 2 {print $4}'\'')" -ge "${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-5}"; xcodebuild -version >/dev/null; /opt/homebrew/bin/java -version >/dev/null 2>&1; /opt/homebrew/bin/pod --version >/dev/null 2>&1; test -x /Users/admin/actions-runner/bin/Runner.Listener; xcrun simctl list runtimes | grep -q "iOS"'
 }
 
 verify_base() {
