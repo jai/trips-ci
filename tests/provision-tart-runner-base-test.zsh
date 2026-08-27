@@ -50,6 +50,7 @@ TRIPS_TART_BASE_LIBRARY_ONLY=false \
 zsh "${repo_root}/scripts/provision-tart-runner-base.zsh" --verify
 [[ "$(sed -n '1p' "$fake_log")" == 'list --source local --quiet' ]]
 [[ "$(sed -n '2p' "$fake_log")" == exec\ trips-runner-base-next\ /bin/zsh\ -lc\ * ]]
+grep -q '/opt/homebrew/bin/pod --version' "$fake_log"
 
 if FAKE_TART_LOG="$fake_log" \
   FAKE_BASE_NAME=trips-runner-base-next \
