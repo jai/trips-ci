@@ -10,9 +10,9 @@
 
 ```text
 <!-- CODEX_REVIEW_DECISION -->
-DECISION=APPROVE|REQUEST_CHANGES
-BLOCKER=<required when REQUEST_CHANGES>
-NEXT_ACTION=<required when REQUEST_CHANGES>
+DECISION=APPROVE|REQUEST_CHANGES|UNAVAILABLE
+BLOCKER=<required when REQUEST_CHANGES or UNAVAILABLE>
+NEXT_ACTION=<required when REQUEST_CHANGES or UNAVAILABLE>
 <!-- /CODEX_REVIEW_DECISION -->
 ```
 
@@ -21,6 +21,7 @@ Parser rules:
 - Only comments created **after** the run start timestamp count.
 - Latest valid marker wins.
 - No fallback to existing review state.
+- `UNAVAILABLE` is only emitted by the workflow's own crash fallback (Codex CLI exited non-zero, e.g. expired `CODEX_AUTH_JSON`). It never submits a formal review.
 
 ---
 
@@ -278,7 +279,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "No valid CODEX_REVIEW
 
 - **Trigger/event**: Any full-review trigger
 - **Preconditions**:
-  - Codex posts a marker block with `DECISION=LGTM` (or any value other than `APPROVE`/`REQUEST_CHANGES`).
+  - Codex posts a marker block with `DECISION=LGTM` (or any value other than `APPROVE`/`REQUEST_CHANGES`/`UNAVAILABLE`).
 - **Expected decision path**: Parser's `case` statement falls through to `*)`; marker is not valid → `decision_found=false`.
 - **Expected workflow actions**: Same as UC-05 — orchestration skipped.
 - **Expected PR outcome**: No review state change.
@@ -589,6 +590,25 @@ grep -c "create_pending_pull_request_review\|submit_pending_pull_request_review"
 
 ---
 
+### UC-18 · Codex crash → UNAVAILABLE (no formal review)
+
+- **Trigger/event**: `pull_request` event or `/review` slash command
+- **Preconditions**:
+  - Codex CLI exits non-zero before emitting a marker (expired auth, service outage, runner fault).
+- **Expected decision path**: `Fallback decision marker when Codex execution crashes` posts `DECISION=UNAVAILABLE` with `BLOCKER` (run URL) and `NEXT_ACTION`; `parse-review-decision` → `decision_found=true`, `decision=UNAVAILABLE`.
+- **Expected workflow actions**:
+  1. `review-orchestration` job runs and computes thread counts.
+  2. No `gh pr review --approve` and no `gh pr review --request-changes` is executed.
+  3. A `::warning::` notes that a human review is still required by the ruleset.
+- **Expected PR outcome**: one marker comment from the CI actor; **no** `CHANGES_REQUESTED` or `APPROVED` review from the CI actor; required check stays green.
+- **Evidence to capture**:
+  - `gh api repos/$REPO/issues/$PR_NUMBER/comments` contains `DECISION=UNAVAILABLE`.
+  - `gh api repos/$REPO/pulls/$PR_NUMBER/reviews` has no CI-actor review created after the run start.
+
+**Pass criteria**: crash is visible as a comment, PR merge state depends only on human review + required checks (nothing to dismiss).
+
+---
+
 ## Quick Reference: Covered Cases Checklist
 
 - **UC-01**: ✅ APPROVE clean path (0 unresolved threads)
@@ -608,6 +628,7 @@ grep -c "create_pending_pull_request_review\|submit_pending_pull_request_review"
 - **UC-15**: ✅ Empty commit CI trigger logic
 - **UC-16**: ✅ Fork PR → skip empty commit
 - **UC-17**: 🔍 Static: no READY_FOR_REVIEW protocol remnants
+- **UC-18**: ❌ Codex crash → `UNAVAILABLE` marker, no formal review (negative)
 
 Legend: ✅ happy path · ❌ negative/failure path · 🔒 safety constraint · 🔍 static check
 

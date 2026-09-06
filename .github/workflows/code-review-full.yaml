@@ -41,13 +41,13 @@ on:
         description: "Whether a valid CODEX_REVIEW_DECISION marker was found"
         value: ${{ jobs.review.outputs.decision_found }}
       decision:
-        description: "Parsed decision value (APPROVE|REQUEST_CHANGES)"
+        description: "Parsed decision value (APPROVE|REQUEST_CHANGES|UNAVAILABLE). UNAVAILABLE means Codex crashed before reviewing; no formal review is submitted."
         value: ${{ jobs.review.outputs.decision }}
       blocker:
-        description: "Parsed BLOCKER value (for REQUEST_CHANGES)"
+        description: "Parsed BLOCKER value (for REQUEST_CHANGES|UNAVAILABLE)"
         value: ${{ jobs.review.outputs.blocker }}
       next_action:
-        description: "Parsed NEXT_ACTION value (for REQUEST_CHANGES)"
+        description: "Parsed NEXT_ACTION value (for REQUEST_CHANGES|UNAVAILABLE)"
         value: ${{ jobs.review.outputs.next_action }}
       pr_number:
         description: "PR number processed by this run"
@@ -505,16 +505,24 @@ jobs:
           BLOCKER="Codex full-review execution crashed before emitting a structured decision marker (see run log: ${RUN_URL})."
           NEXT_ACTION="Re-run /review on this PR after Codex auth/service recovers; if persistent, investigate the failing run logs and workflow inputs."
 
+          # A crash is an infrastructure outcome, not a code finding. Post the marker so
+          # the run stays auditable and the required check stays green, but do not turn
+          # it into a formal REQUEST_CHANGES review: that review would also have to be
+          # dismissed after a human approves, while the ruleset's required-approval
+          # count already keeps the PR from merging without a real review.
           FALLBACK_MARKER=$(printf '%s\n' \
             "<!-- CODEX_REVIEW_DECISION -->" \
-            "DECISION=REQUEST_CHANGES" \
+            "DECISION=UNAVAILABLE" \
             "BLOCKER=${BLOCKER}" \
             "NEXT_ACTION=${NEXT_ACTION}" \
-            "<!-- /CODEX_REVIEW_DECISION -->")
+            "<!-- /CODEX_REVIEW_DECISION -->" \
+            "" \
+            "Codex review unavailable: ${BLOCKER}" \
+            "Next action: ${NEXT_ACTION}")
 
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$FALLBACK_MARKER"
 
-          echo "::warning::Codex CLI failed; posted fail-closed REQUEST_CHANGES marker so orchestration can continue without a red required check."
+          echo "::warning::Codex CLI failed; posted DECISION=UNAVAILABLE marker (no formal review) so orchestration can continue without a red required check."
 
       - name: Parse structured review decision
         id: parse-review-decision
@@ -580,10 +588,10 @@ jobs:
                 NEXT_ACTION=""
                 break
                 ;;
-              REQUEST_CHANGES)
+              REQUEST_CHANGES|UNAVAILABLE)
                 if [[ -n "$CANDIDATE_BLOCKER" && -n "$CANDIDATE_NEXT_ACTION" ]]; then
                   DECISION_FOUND="true"
-                  DECISION="REQUEST_CHANGES"
+                  DECISION="$CANDIDATE_DECISION"
                   BLOCKER="$CANDIDATE_BLOCKER"
                   NEXT_ACTION="$CANDIDATE_NEXT_ACTION"
                   break
@@ -1056,3 +1064,13 @@ jobs:
             printf '%s\n' "$REVIEW_OUTPUT" >&2
             exit "$REVIEW_EXIT"
           fi
+
+      - name: Report unavailable Codex review (no formal review submitted)
+        if: steps.pr-meta.outputs.decision == 'UNAVAILABLE'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr-meta.outputs.pr_number }}
+          BLOCKER: ${{ steps.pr-meta.outputs.blocker }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Codex review for PR #${PR_NUMBER} was unavailable (${BLOCKER}). No approval or request-changes review was submitted; a human review is still required by the ruleset."
