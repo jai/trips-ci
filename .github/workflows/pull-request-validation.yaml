@@ -82,11 +82,21 @@ jobs:
               );
             }
 
-            if (/<!--/.test(bodyWithoutCode)) {
+            // Cursor Cloud Agents wrap the body they write in these two markers; they are
+            // not template guidance, so tolerate exactly those and nothing else.
+            const bodyWithoutAgentMarkers = bodyWithoutCode.replace(
+              /<!--\s*\/?CURSOR_AGENT_PR_BODY_(?:BEGIN|END)\s*-->/g,
+              "",
+            );
+            if (/<!--/.test(bodyWithoutAgentMarkers)) {
               errors.push("PR body still contains template comments. Remove all `<!-- ... -->` guidance.");
             }
 
-            if (/Closes\s+#\s*$/im.test(bodyWithoutCode) || /<[^>\n]+>/.test(bodyWithoutCode) || /\b(?:TBD|TODO)\b/i.test(bodyWithoutCode)) {
+            // `<placeholder>` text is rejected, but real inline HTML used for evidence
+            // (screenshots, recordings, collapsible sections) is allowed.
+            const allowedHtmlTag = /<\/?(?:img|video|source|details|summary|br|sub|sup|kbd|p|a|picture)\b[^>\n]*\/?>/gi;
+            const bodyWithoutHtml = bodyWithoutAgentMarkers.replace(allowedHtmlTag, "");
+            if (/Closes\s+#\s*$/im.test(bodyWithoutCode) || /<[^>\n]+>/.test(bodyWithoutHtml) || /\b(?:TBD|TODO)\b/i.test(bodyWithoutCode)) {
               errors.push("PR body still contains template placeholder text.");
             }
 
@@ -130,7 +140,9 @@ jobs:
 
             const relatedIssue = sectionFor(body, "## Related Issue");
             if (!hasMeaningfulContent(relatedIssue)) {
-              errors.push("`## Related Issue` must contain an auto-closing issue reference.");
+              errors.push(
+                "`## Related Issue` must contain an auto-closing issue reference, or `None: <reason>` when the PR closes nothing (docs, maintenance, automation).",
+              );
             }
 
             const validation = sectionFor(body, "## Validation");
@@ -138,13 +150,31 @@ jobs:
               errors.push("`## Validation` must list commands/checks that were run, or `- [ ] Not run: <reason>`.");
             }
 
-            if (/\brefs?\s+(?:https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+|#\d+)\b/i.test(bodyWithoutCode)) {
-              errors.push("Use `Closes`, `Fixes`, or `Resolves` for issue references. `Refs` does not auto-close.");
-            }
+            // Escape hatch mirroring `- [ ] Not run: <reason>`: a line starting with
+            // `None:` plus a real reason declares that this PR intentionally closes no issue.
+            const noIssueDeclaration = /^\s*(?:[-*]\s*)?None:\s*(\S.{9,})$/im.exec(stripMarkdownCode(relatedIssue));
+            const declaresNoIssue = noIssueDeclaration !== null;
 
             const issueRefs = extractClosingIssueRefs(bodyWithoutCode, context.repo);
-            if (issueRefs.length === 0) {
-              errors.push("PR body must include at least one auto-closing issue reference, for example `Closes #123`.");
+
+            if (
+              issueRefs.length === 0 &&
+              !declaresNoIssue &&
+              /\brefs?\s+(?:https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/issues\/\d+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+|#\d+)\b/i.test(bodyWithoutCode)
+            ) {
+              errors.push(
+                "Use `Closes`, `Fixes`, or `Resolves` for issue references. `Refs` does not auto-close; if the PR closes nothing, write `None: <reason>` under `## Related Issue` (Refs may accompany it).",
+              );
+            }
+
+            if (issueRefs.length === 0 && !declaresNoIssue) {
+              errors.push(
+                "PR body must include at least one auto-closing issue reference (for example `Closes #123`), or `None: <reason>` under `## Related Issue`.",
+              );
+            }
+
+            if (issueRefs.length > 0 && declaresNoIssue) {
+              errors.push("`## Related Issue` declares `None:` but the body also contains an auto-closing reference. Keep one or the other.");
             }
 
             if (issueRefs.length > 0) {
