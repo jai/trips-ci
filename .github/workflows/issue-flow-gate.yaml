@@ -118,6 +118,14 @@ jobs:
               return;
             }
 
+            const body = pullRequest.body || "";
+            const noIssueDeclaration = /^\s*(?:[-*]\s*)?None:\s*(\S.{9,})$/im;
+            const relatedIssue = sectionFor(body, "## Related Issue");
+            if (noIssueDeclaration.test(stripMarkdownCode(relatedIssue))) {
+              core.notice("Related Issue declares None:; issue-flow gate not applicable");
+              return;
+            }
+
             const issueByKey = new Map();
             const addIssue = (issue) => {
               issueByKey.set(`${issue.repository.nameWithOwner}#${issue.number}`, {
@@ -134,7 +142,6 @@ jobs:
               addIssue(issue);
             }
 
-            const body = pullRequest.body || "";
             const bodyRefs = new Map();
             const addRef = (refOwner, refRepo, number) => {
               if (!Number.isInteger(number) || number <= 0) return;
@@ -155,21 +162,31 @@ jobs:
               const key = `${ref.owner}/${ref.repo}#${ref.number}`;
               if (issueByKey.has(key)) continue;
 
-              const { data } = await github.rest.issues.get({
-                owner: ref.owner,
-                repo: ref.repo,
-                issue_number: ref.number,
-              });
+              try {
+                const { data } = await github.rest.issues.get({
+                  owner: ref.owner,
+                  repo: ref.repo,
+                  issue_number: ref.number,
+                });
 
-              if (data.pull_request) continue;
-              addIssue({
-                number: data.number,
-                title: data.title,
-                url: data.html_url,
-                state: data.state.toUpperCase(),
-                repository: { nameWithOwner: `${ref.owner}/${ref.repo}` },
-                labels: data.labels.map((label) => label.name),
-              });
+                if (data.pull_request) continue;
+                addIssue({
+                  number: data.number,
+                  title: data.title,
+                  url: data.html_url,
+                  state: data.state.toUpperCase(),
+                  repository: { nameWithOwner: `${ref.owner}/${ref.repo}` },
+                  labels: data.labels.map((label) => label.name),
+                });
+              } catch (error) {
+                if (error.status === 404) {
+                  core.setFailed(
+                    `Issue #${ref.number} not found in ${ref.owner}/${ref.repo}; cross-repo references must be written owner/repo#N`,
+                  );
+                  return;
+                }
+                throw error;
+              }
             }
 
             const issues = [...issueByKey.values()];
@@ -211,3 +228,23 @@ jobs:
                 .map((issue) => `${issue.repository}#${issue.number}`)
                 .join(", ")}`,
             );
+
+            function sectionFor(markdown, heading) {
+              const pattern = new RegExp(`^${escapeRegExp(heading)}\\s*$`, "m");
+              const match = pattern.exec(markdown);
+              if (!match) return "";
+              const start = match.index + match[0].length;
+              const rest = markdown.slice(start);
+              const nextHeading = rest.search(/^##\s+/m);
+              return (nextHeading >= 0 ? rest.slice(0, nextHeading) : rest).trim();
+            }
+
+            function stripMarkdownCode(markdown) {
+              return markdown
+                .replace(/```[\s\S]*?```/g, "")
+                .replace(/`[^`\n]*`/g, "");
+            }
+
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            }

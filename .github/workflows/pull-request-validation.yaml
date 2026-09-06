@@ -83,8 +83,11 @@ jobs:
             }
 
             // Cursor Cloud Agents wrap the body they write in these two markers; they are
-            // not template guidance, so tolerate exactly those and nothing else.
-            const bodyWithoutAgentMarkers = bodyWithoutCode.replace(
+            // not template guidance. When the END marker is present, ignore everything after it
+            // (e.g. auto-generated footer HTML) for template-comment and placeholder checks.
+            const endMarker = /<!--\s*CURSOR_AGENT_PR_BODY_END\s*-->/.exec(bodyWithoutCode);
+            const agentBody = endMarker ? bodyWithoutCode.slice(0, endMarker.index) : bodyWithoutCode;
+            const bodyWithoutAgentMarkers = agentBody.replace(
               /<!--\s*\/?CURSOR_AGENT_PR_BODY_(?:BEGIN|END)\s*-->/g,
               "",
             );
@@ -96,7 +99,7 @@ jobs:
             // (screenshots, recordings, collapsible sections) is allowed.
             const allowedHtmlTag = /<\/?(?:img|video|source|details|summary|br|sub|sup|kbd|p|a|picture)\b[^>\n]*\/?>/gi;
             const bodyWithoutHtml = bodyWithoutAgentMarkers.replace(allowedHtmlTag, "");
-            if (/Closes\s+#\s*$/im.test(bodyWithoutCode) || /<[^>\n]+>/.test(bodyWithoutHtml) || /\b(?:TBD|TODO)\b/i.test(bodyWithoutCode)) {
+            if (/Closes\s+#\s*$/im.test(bodyWithoutAgentMarkers) || /<[^>\n]+>/.test(bodyWithoutHtml) || /\b(?:TBD|TODO)\b/i.test(bodyWithoutAgentMarkers)) {
               errors.push("PR body still contains template placeholder text.");
             }
 
