@@ -118,7 +118,13 @@ jobs:
               return;
             }
 
+            const body = pullRequest.body || "";
             const noIssueDeclaration = /^\s*(?:[-*]\s*)?None:\s*(\S.{9,})$/im;
+            const relatedIssue = sectionFor(body, "## Related Issue");
+            if (noIssueDeclaration.test(stripMarkdownCode(relatedIssue))) {
+              core.notice("Related Issue declares None:; issue-flow gate not applicable");
+              return;
+            }
 
             const issueByKey = new Map();
             const addIssue = (issue) => {
@@ -136,7 +142,6 @@ jobs:
               addIssue(issue);
             }
 
-            const body = pullRequest.body || "";
             const bodyRefs = new Map();
             const addRef = (refOwner, refRepo, number) => {
               if (!Number.isInteger(number) || number <= 0) return;
@@ -186,12 +191,6 @@ jobs:
 
             const issues = [...issueByKey.values()];
             if (issues.length === 0) {
-              const relatedIssue = sectionFor(body, "## Related Issue");
-              if (noIssueDeclaration.test(stripMarkdownCode(relatedIssue))) {
-                core.notice("Related Issue declares None:; issue-flow gate not applicable");
-                return;
-              }
-
               core.setFailed(
                 "No linked issue found. Link the implementation issue in the PR body, preferably with `Fixes owner/repo#123`.",
               );
