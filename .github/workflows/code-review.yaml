@@ -4,6 +4,11 @@ name: Codex PR Assistant
 on:
   workflow_call:
     inputs:
+      runner_labels:
+        description: JSON array of runner labels for repositories outside the Trips runner pool.
+        type: string
+        required: false
+        default: '["self-hosted", "linux", "arm64", "jai-ci"]'
       custom_review_instructions:
         description: Optional additional review instructions prepended to the default review prompt.
         type: string
@@ -44,6 +49,8 @@ jobs:
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) &&
       (github.event.action == 'opened' || github.event.action == 'reopened')
     uses: ./.github/workflows/code-review-welcome.yaml
+    with:
+      runner_labels: ${{ inputs.runner_labels }}
     secrets:
       GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
 
@@ -69,6 +76,7 @@ jobs:
       )
     uses: ./.github/workflows/code-review-full.yaml
     with:
+      runner_labels: ${{ inputs.runner_labels }}
       custom_review_instructions: ${{ inputs.custom_review_instructions }}
       codex_version: ${{ inputs.codex_version }}
       codex_model: ${{ inputs.codex_model }}
@@ -97,6 +105,7 @@ jobs:
       )
     uses: ./.github/workflows/code-review-respond.yaml
     with:
+      runner_labels: ${{ inputs.runner_labels }}
       codex_version: ${{ inputs.codex_version }}
       codex_model: ${{ inputs.codex_model }}
       codex_reasoning_effort: ${{ inputs.codex_reasoning_effort }}

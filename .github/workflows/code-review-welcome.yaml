@@ -6,6 +6,12 @@ name: Code Review Welcome
 
 on:
   workflow_call:
+    inputs:
+      runner_labels:
+        description: JSON array of runner labels for repositories outside the Trips runner pool.
+        type: string
+        required: false
+        default: '["self-hosted", "linux", "arm64", "jai-ci"]'
     secrets:
       GH_TOKEN:
         required: true
@@ -18,7 +24,7 @@ permissions:
 
 jobs:
   welcome:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened')
     steps:
       - uses: actions/checkout@v4

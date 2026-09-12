@@ -7,6 +7,11 @@ name: Codex PR Assistant Respond
 on:
   workflow_call:
     inputs:
+      runner_labels:
+        description: JSON array of runner labels for repositories outside the Trips runner pool.
+        type: string
+        required: false
+        default: '["self-hosted", "linux", "arm64", "jai-ci"]'
       codex_version:
         description: Codex CLI version to install (latest or exact semver)
         type: string
@@ -36,7 +41,7 @@ permissions:
 
 jobs:
   respond:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     timeout-minutes: 30
     outputs:
       has_pr: ${{ steps.extract-pr.outputs.has_pr }}
@@ -359,7 +364,7 @@ jobs:
           retention-days: 1
 
   post-response:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     timeout-minutes: 10
     needs: respond
     if: needs.respond.outputs.has_pr == 'true'
