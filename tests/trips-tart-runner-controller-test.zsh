@@ -10,42 +10,8 @@ fake_gh="${test_directory}/gh"
 cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
-
-request="$*"
-case "${FAKE_SCENARIO:-}" in
-  tonegate-only)
-    if [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]]; then
-      print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
-    elif [[ "$request" == *'repos/jai/tonegate/actions/runs/101/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
-    fi
-    ;;
-  trips-first)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
-    fi
-    ;;
-  incompatible-host)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'303\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/303/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
-    fi
-    ;;
-  no-jobs)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[]}]'
-    fi
-    ;;
-  *)
-    print -u2 -- "Unknown fake scenario"
-    exit 1
-    ;;
-esac
+print -u2 -- 'GitHub CLI must not be used for controller queue discovery'
+exit 99
 SCRIPT
 chmod 700 "$fake_gh"
 
@@ -54,7 +20,32 @@ cat > "$fake_curl" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
-if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
+[[ -n "${FAKE_CURL_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_CURL_LOG"
+scenario="${FAKE_SCENARIO:-}"
+if [[ "$request" == *'actions/runs?status='* ]]; then
+  case "$scenario" in
+    tonegate-only)
+      [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":101,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/tonegate"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    trips-first|no-jobs)
+      [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":202,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    incompatible-host)
+      [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":303,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    *) print -u2 -- "Unknown fake scenario: $scenario"; exit 1 ;;
+  esac
+elif [[ "$request" == *'actions/runs/101/jobs?'* ]]; then
+  print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+elif [[ "$request" == *'actions/runs/202/jobs?'* ]]; then
+  if [[ "$scenario" == no-jobs ]]; then
+    print -r -- '{"jobs":[]}'
+  else
+    print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+  fi
+elif [[ "$request" == *'actions/runs/303/jobs?'* ]]; then
+  print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}'
+elif [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
   print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"tart"},{"name":"ios"},{"name":"unexpected"}]}]}'
@@ -127,6 +118,7 @@ export TRIPS_TART_ALLOWED_CORESIDENT_VMS='atlas-eve-alpha'
 source "${repo_root}/scripts/trips-tart-runner-controller.zsh"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
+export FAKE_CURL_LOG="${test_directory}/curl.log"
 
 assert_equal() {
   local expected="$1" actual="$2"
@@ -213,6 +205,7 @@ if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202 | /usr/bin/gr
   print -u2 -- 'Expected no matching queued job'
   exit 1
 fi
+/usr/bin/grep -q 'Authorization: Bearer test-token' "$FAKE_CURL_LOG"
 
 typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
 typeset -g frontend_queued_at=2026-08-25T00:03:00Z
