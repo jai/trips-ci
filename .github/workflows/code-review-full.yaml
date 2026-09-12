@@ -11,6 +11,11 @@ name: Codex Full Review
 on:
   workflow_call:
     inputs:
+      runner_labels:
+        description: JSON array of runner labels for repositories outside the Trips runner pool.
+        type: string
+        required: false
+        default: '["self-hosted", "linux", "arm64", "jai-ci"]'
       custom_review_instructions:
         description: "Optional additional review instructions prepended to the default review prompt (e.g. VISION.md alignment checks)"
         type: string
@@ -77,7 +82,7 @@ permissions:
 
 jobs:
   review:
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     timeout-minutes: 30
     env:
       # Use the Trips review token so review comments and formal reviews are attributed consistently.
@@ -706,7 +711,7 @@ jobs:
     name: Review Orchestration
     needs: review
     if: ${{ needs.review.outputs.decision_found == 'true' }}
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     timeout-minutes: 15
     permissions:
       contents: write
