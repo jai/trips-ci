@@ -25,7 +25,6 @@ readonly controller_lock="${TRIPS_TART_CONTROLLER_LOCK:-${log_directory}/control
 readonly native_lane_lock="${TRIPS_TART_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
 readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-20}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
-readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
 readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
 readonly shlock_cli="${TRIPS_TART_SHLOCK_CLI:-/usr/bin/shlock}"
@@ -191,31 +190,48 @@ repository_is_private() {
 }
 
 repository_workflow_runs() {
-  local repository="$1" run_status
+  local repository="$1" run_status response page count
   for run_status in queued in_progress; do
-    "$gh_cli" api \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      --paginate \
-      "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
-      --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
+    page=1
+    while true; do
+      installation_token || return 2
+      response=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+        -H "Authorization: Bearer $REPLY" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${repository}/actions/runs?status=${run_status}&per_page=100&page=${page}") || return 2
+      printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
+for run in json.load(sys.stdin).get("workflow_runs", []):
+    head_repository=run.get("head_repository") or {}
+    print(f"{run.get('"'"'id'"'"','"'"''"'"')}\\t{run.get('"'"'created_at'"'"','"'"''"'"')}\\t{head_repository.get('"'"'full_name'"'"','"'"''"'"')}")' || return 2
+      count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("workflow_runs", [])))') || return 2
+      (( count < 100 )) && break
+      (( page++ ))
+    done
   done
 }
 
 workflow_run_oldest_queued_job_timestamp() {
   setopt local_options pipe_fail
-  local repository="$1" run_id="$2"
-  "$gh_cli" api \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    --paginate --slurp \
-    "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
-    /usr/bin/python3 -c 'import json,sys
+  local repository="$1" run_id="$2" response page count
+  page=1
+  while true; do
+    installation_token || return 2
+    response=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
+      -H "Authorization: Bearer $REPLY" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "https://api.github.com/repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100&page=${page}") || return 2
+    printf '%s' "$response" |
+      /usr/bin/python3 -c 'import json,sys
 required={"self-hosted","macos","arm64","tart","ios"}
-pages=json.load(sys.stdin)
-jobs=[job for page in pages for job in page.get("jobs",[])]
+jobs=json.load(sys.stdin).get("jobs", [])
 matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and {str(label).lower() for label in job.get("labels",[])} == required and job.get("created_at")]
 print(min(matches) if matches else "")' || return 2
+    count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("jobs", [])))') || return 2
+    (( count < 100 )) && break
+    (( page++ ))
+  done
 }
 
 repository_oldest_queued_job_timestamp() {
@@ -624,10 +640,6 @@ main() {
   mkdir -p "$work_disk_directory"
   if [[ ! -s "$private_key" || ! -s "$ssh_key" ]]; then
     log "required runner credential is missing"
-    return 1
-  fi
-  if ! "$gh_cli" auth status >/dev/null 2>&1; then
-    log "GitHub CLI authentication is unavailable"
     return 1
   fi
   for repository in ${(s:,:)repositories}; do
