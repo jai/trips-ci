@@ -190,6 +190,7 @@ repository_is_private() {
 }
 
 repository_workflow_runs() {
+  setopt local_options pipe_fail
   local repository="$1" run_status response page count
   for run_status in queued in_progress; do
     page=1
@@ -203,7 +204,7 @@ repository_workflow_runs() {
       printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys
 for run in json.load(sys.stdin).get("workflow_runs", []):
     head_repository=run.get("head_repository") or {}
-    print(f"{run.get('"'"'id'"'"','"'"''"'"')}\\t{run.get('"'"'created_at'"'"','"'"''"'"')}\\t{head_repository.get('"'"'full_name'"'"','"'"''"'"')}")' || return 2
+    print(f"{run.get('"'"'id'"'"','"'"''"'"')}\t{run.get('"'"'created_at'"'"','"'"''"'"')}\t{head_repository.get('"'"'full_name'"'"','"'"''"'"')}")' || return 2
       count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("workflow_runs", [])))') || return 2
       (( count < 100 )) && break
       (( page++ ))
@@ -213,7 +214,7 @@ for run in json.load(sys.stdin).get("workflow_runs", []):
 
 workflow_run_oldest_queued_job_timestamp() {
   setopt local_options pipe_fail
-  local repository="$1" run_id="$2" response page count
+  local repository="$1" run_id="$2" response page count queued_at oldest_queued_at=""
   page=1
   while true; do
     installation_token || return 2
@@ -222,16 +223,20 @@ workflow_run_oldest_queued_job_timestamp() {
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
       "https://api.github.com/repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100&page=${page}") || return 2
-    printf '%s' "$response" |
+    queued_at=$(printf '%s' "$response" |
       /usr/bin/python3 -c 'import json,sys
 required={"self-hosted","macos","arm64","tart","ios"}
 jobs=json.load(sys.stdin).get("jobs", [])
 matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and {str(label).lower() for label in job.get("labels",[])} == required and job.get("created_at")]
-print(min(matches) if matches else "")' || return 2
+print(min(matches) if matches else "")') || return 2
+    if [[ -n "$queued_at" && ( -z "$oldest_queued_at" || "$queued_at" < "$oldest_queued_at" ) ]]; then
+      oldest_queued_at="$queued_at"
+    fi
     count=$(printf '%s' "$response" | /usr/bin/python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("jobs", [])))') || return 2
     (( count < 100 )) && break
     (( page++ ))
   done
+  print -r -- "$oldest_queued_at"
 }
 
 repository_oldest_queued_job_timestamp() {

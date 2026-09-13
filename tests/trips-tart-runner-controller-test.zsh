@@ -22,6 +22,30 @@ set -eu
 request="$*"
 [[ -n "${FAKE_CURL_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_CURL_LOG"
 scenario="${FAKE_SCENARIO:-}"
+if [[ "$scenario" == api-error ]]; then
+  exit 22
+fi
+if [[ "$scenario" == paginated ]]; then
+  if [[ "$request" == *'repos/jai/tonegate/'* || "$request" == *'status=in_progress'* ]]; then
+    print -r -- '{"workflow_runs":[]}'
+  elif [[ "$request" == *'actions/runs?'* ]]; then
+    if [[ "$request" == *'page=1' ]]; then
+      /usr/bin/python3 -c 'import json; print(json.dumps({"workflow_runs":[{"id":i,"head_repository":{"full_name":"outside/fork"}} for i in range(100)]}))'
+    else
+      print -r -- '{"workflow_runs":[{"id":202,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}'
+    fi
+  elif [[ "$request" == *'actions/runs/202/jobs?'* ]]; then
+    if [[ "$request" == *'page=1' ]]; then
+      /usr/bin/python3 -c 'import json; job={"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}; print(json.dumps({"jobs":[job for _ in range(100)]}))'
+    else
+      [[ "${FAKE_PAGE_TWO_ERROR:-false}" != true ]] || exit 22
+      print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+    fi
+  else
+    exit 1
+  fi
+  exit 0
+fi
 if [[ "$request" == *'actions/runs?status='* ]]; then
   case "$scenario" in
     tonegate-only)
@@ -206,6 +230,41 @@ if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202 | /usr/bin/gr
   exit 1
 fi
 /usr/bin/grep -q 'Authorization: Bearer test-token' "$FAKE_CURL_LOG"
+
+# Exercise discovery through parsing and repository selection, without replacing
+# any production queue helper. A valid job must actually start a runner cycle.
+export FAKE_SCENARIO=trips-first
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+export FAKE_SCENARIO=tonegate-only
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+export FAKE_SCENARIO=paginated
+assert_equal 2026-08-25T00:00:01Z "$(repository_oldest_queued_job_timestamp jai/trips-frontend)"
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+export FAKE_PAGE_TWO_ERROR=true
+if next_repository; then
+  print -u2 -- 'Partial API results must not dispatch work after a page failure'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_PAGE_TWO_ERROR
+export FAKE_SCENARIO=api-error
+if next_repository; then
+  print -u2 -- 'API errors must propagate through real queue discovery'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+export FAKE_SCENARIO=incompatible-host
+if next_repository; then
+  print -u2 -- 'Incompatible labels must not dispatch a runner'
+  exit 1
+else
+  assert_equal 1 "$?"
+fi
 
 typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
 typeset -g frontend_queued_at=2026-08-25T00:03:00Z
