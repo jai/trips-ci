@@ -40,7 +40,7 @@ zsh -n \
   "$repo_root/tests/trips-android-host-runner-controller-test.zsh" \
   "$repo_root/tests/trips-linux-lima-runner-controller-test.zsh" \
   "$repo_root/tests/provision-tart-runner-base-test.zsh" \
-  "$repo_root/tests/trips-tart-runner-controller-test.zsh" \
+  "$repo_root/tests/trips-tart-runner-controller-test.zsh"
 "$repo_root/tests/trips-linux-lima-runner-controller-test.zsh"
 "$repo_root/tests/provision-tart-runner-base-test.zsh"
 "$repo_root/tests/trips-tart-runner-controller-test.zsh"

@@ -639,7 +639,7 @@ run_one_ephemeral_runner() {
 
     wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
-      bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
+      bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; docker buildx version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
     registration_token "$repository" || return 1
     token="$REPLY"

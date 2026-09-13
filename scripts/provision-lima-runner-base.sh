@@ -15,7 +15,7 @@ systemctl mask apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-dai
 
 apt-get update
 apt-get install -y --no-install-recommends \
-  build-essential ca-certificates curl docker-compose-v2 docker.io gh git git-lfs jq psmisc rsync shellcheck unzip xz-utils
+  build-essential ca-certificates curl docker-buildx docker-compose-v2 docker.io gh git git-lfs jq psmisc rsync shellcheck unzip xz-utils
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
@@ -59,6 +59,7 @@ install -d -m 0755 "$runner_home/.cache" "$runner_home/.npm"
 chown -R jai:jai "$runner_home/.cache" "$runner_home/.npm"
 docker info --format 'Docker {{.ServerVersion}} using {{.Driver}} at {{.DockerRootDir}}'
 docker compose version
+docker buildx version
 /usr/bin/gh --version
 /usr/local/bin/node --version
 /usr/local/bin/npm --version
