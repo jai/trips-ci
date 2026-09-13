@@ -18,6 +18,12 @@ permissions:
   issues: read
   pull-requests: write
 
+# Metadata checks are replaceable: only the latest event for each PR matters.
+# Include the caller workflow to avoid cancelling a different required check.
+concurrency:
+  group: trips-metadata-pr-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   validate-pr:
     name: Validate PR
