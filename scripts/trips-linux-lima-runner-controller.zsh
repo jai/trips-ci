@@ -242,7 +242,9 @@ next_repository() {
         log "reserved ${deploy_repository} deploy queue (eligible job queued ${queued_at})"
         return 0
       fi
-      reservation_contended=true
+      # Slot b releases this short provisioning reservation after job claim.
+      # Do not occupy the only deploy slot with unrelated work while waiting.
+      return 3
     else
       lookup_status=$?
       (( lookup_status == 1 )) || return "$lookup_status"

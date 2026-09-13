@@ -196,6 +196,22 @@ for deploy_scenario in queued in_progress; do
   assert_equal deploy "$selected_runner_lane"
   release_selection_lock
 done
+export FAKE_DEPLOY_SCENARIO=queued
+selection_lock_path jai/trips-frontend
+deploy_reserved_lock="$REPLY"
+mkdir "$deploy_reserved_lock"
+print -r -- $$ > "${deploy_reserved_lock}/pid"
+if next_repository; then
+  print -u2 -- 'Slot A must retry the pending deploy reservation instead of taking general work'
+  exit 1
+else
+  assert_equal 3 "$?"
+fi
+assert_equal '' "$selected_repository"
+rm -r "$deploy_reserved_lock"
+next_repository
+assert_equal deploy "$selected_runner_lane"
+release_selection_lock
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 103 general)"
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 103 native)"
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 deploy)"
