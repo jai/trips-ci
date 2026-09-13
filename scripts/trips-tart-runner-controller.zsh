@@ -284,6 +284,9 @@ next_repository() {
   local repository queued_at oldest_queued_at
   local -i lookup_status
   selected_repository=""
+  # Refresh in the controller shell before nested queue reads so the cached
+  # token survives command substitutions and is reused by the next poll.
+  installation_token || return 2
   oldest_queued_at=""
   for repository in "${repository_list[@]}"; do
     if queued_at=$(repository_oldest_queued_job_timestamp "$repository"); then

@@ -214,6 +214,9 @@ next_repository() {
   local -i lookup_status
   local reservation_contended=false
   selected_repository=""
+  # Refresh in the controller shell before nested queue reads so the cached
+  # token survives command substitutions and is reused by the next poll.
+  installation_token || return 2
   selected_runner_lane=general
   repository_count=${#repository_list[@]}
   (( repository_count > 0 )) || return 1

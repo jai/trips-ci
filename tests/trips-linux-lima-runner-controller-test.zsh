@@ -45,6 +45,12 @@ cat > "$fake_curl" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+if [[ "$request" == *'/access_tokens' ]]; then
+  [[ "${FAKE_TOKEN_ERROR:-false}" != true ]] || exit 22
+  print -r -- minted >> "${FAKE_TOKEN_LOG:?}"
+  print -r -- '{"token":"test-token"}'
+  exit 0
+fi
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
@@ -128,6 +134,39 @@ installation_token_expires_at=4102444800
 assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
 }
+
+# Exercise real token acquisition through nested discovery. Cache updates must
+# survive in the controller shell between scans, including after expiry.
+production_github_jwt="${functions[github_jwt]}"
+github_jwt() { print -r -- test-jwt; }
+export FAKE_TOKEN_LOG="${test_directory}/token-mints.log"
+export FAKE_SCENARIO=standard
+installation_token_value=""
+installation_token_expires_at=0
+for scan in 1 2; do
+  next_repository
+  release_selection_lock
+done
+assert_equal 1 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+assert_equal test-token "$installation_token_value"
+installation_token_expires_at=0
+next_repository
+  release_selection_lock
+assert_equal 2 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+installation_token_expires_at=0
+export FAKE_TOKEN_ERROR=true
+if next_repository 2> "${test_directory}/expected-token-error.log"; then
+  print -u2 -- 'Token refresh failure must prevent queue selection'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+assert_equal '' "$selected_repository"
+unset FAKE_TOKEN_ERROR FAKE_TOKEN_LOG
+functions[github_jwt]="$production_github_jwt"
+installation_token_value=test-token
+installation_token_expires_at=4102444800
+repository_scan_start_index=1
 
 if [[ -o pipefail ]]; then
   print -u2 -- 'Controller source must not enable pipefail globally'
@@ -516,6 +555,8 @@ for concurrent_slot in a b; do
     TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
     /bin/zsh -c '
       source "$1"
+      installation_token_value=test-token
+      installation_token_expires_at=4102444800
       repository_oldest_queued_job_timestamp() { [[ "${2:-general}" != native ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
       next_repository
       print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
