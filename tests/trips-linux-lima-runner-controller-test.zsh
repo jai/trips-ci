@@ -12,12 +12,25 @@ cat > "$fake_gh" <<'SCRIPT'
 set -eu
 request="$*"
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
-if [[ "$request" == *'/actions/runs?'* ]]; then
+if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
+  case "${FAKE_NATIVE_SCENARIO:-}" in
+    failure) exit 22 ;;
+    fork) print -r -- $'102\t2026-08-25T00:04:00Z\tuntrusted/fork' ;;
+    in_progress)
+      [[ "$request" != *'status=in_progress'* ]] || print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend'
+      ;;
+    queued) print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend' ;;
+  esac
+elif [[ "$request" == *'/actions/runs/102/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:04:01Z","labels":["self-hosted","linux","ARM64","jai-ci-native"]}]}]'
+elif [[ "$request" == *'/actions/runs?'* ]]; then
   print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
 elif [[ "$request" == *'/actions/runs/101/jobs?'* ]]; then
   case "${FAKE_SCENARIO:-}" in
     standard) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","linux","ARM64","jai-ci"]}]}]' ;;
     tonegate) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","linux","ARM64","jai-ci-tonegate"]}]}]' ;;
+    native) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","linux","ARM64","jai-ci-native"]}]}]' ;;
+    mixed) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","linux","ARM64","jai-ci-native","jai-ci"]}]}]' ;;
     incompatible) print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","linux","ARM64","another-host"]}]}]' ;;
     *) print -r -- '[{"jobs":[]}]' ;;
   esac
@@ -45,6 +58,7 @@ fake_lima="${test_directory}/limactl"
 cat > "$fake_lima" <<'SCRIPT'
 #!/bin/zsh
 set -eu
+[[ -z "${FAKE_LIMA_REQUEST_LOG:-}" ]] || print -r -- "$*" >> "$FAKE_LIMA_REQUEST_LOG"
 if [[ "$*" == *'test -x /usr/bin/fuser'* ]]; then
   [[ "${FAKE_PACKAGE_FUSER_EXISTS:-true}" == true ]] || exit 1
   [[ "${FAKE_PACKAGE_SUDO_PREFLIGHT_OK:-true}" == true ]] || exit 1
@@ -144,6 +158,59 @@ if /usr/bin/grep -q 'status=in_progress' "$FAKE_GH_REQUEST_LOG"; then
 fi
 unset FAKE_GH_REQUEST_LOG
 
+export FAKE_SCENARIO=native
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101)"
+assert_equal 2026-08-25T00:00:02Z "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 native)"
+export FAKE_SCENARIO=mixed
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 native)"
+export FAKE_SCENARIO=standard
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 native)"
+for native_scenario in queued in_progress; do
+  export FAKE_NATIVE_SCENARIO="$native_scenario"
+  next_repository
+  assert_equal jai/trips-frontend "$selected_repository"
+  assert_equal native "$selected_runner_lane"
+  release_selection_lock
+done
+export FAKE_NATIVE_SCENARIO=queued
+selection_lock_path jai/trips-frontend
+native_reserved_lock="$REPLY"
+mkdir "$native_reserved_lock"
+print -r -- $$ > "${native_reserved_lock}/pid"
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+assert_equal general "$selected_runner_lane"
+release_selection_lock
+rm -rf "$native_reserved_lock"
+repository_scan_start_index=1
+export FAKE_NATIVE_SCENARIO=fork
+export FAKE_GH_REQUEST_LOG="${test_directory}/native-fork-requests.log"
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+assert_equal general "$selected_runner_lane"
+release_selection_lock
+if /usr/bin/grep -q '/actions/runs/102/jobs?' "$FAKE_GH_REQUEST_LOG"; then
+  print -u2 -- 'Native discovery must reject fork runs before inspecting their jobs'
+  exit 1
+fi
+unset FAKE_GH_REQUEST_LOG
+export FAKE_NATIVE_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'Native queue discovery errors must fail closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_NATIVE_SCENARIO
+repository_scan_start_index=1
+env TRIPS_LINUX_LIMA_REPOSITORIES=jai/tonegate FAKE_NATIVE_SCENARIO=failure \
+  /bin/zsh -c '
+    source "$1"
+    next_repository || exit 1
+    [[ "$selected_repository" == jai/tonegate && "$selected_runner_lane" == general ]] || exit 1
+    release_selection_lock
+  ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+
 if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
   print -u2 -- 'Expected the public trips-ci repository to stay off private self-hosted runners'
   exit 1
@@ -154,6 +221,7 @@ typeset -g tonegate_queued_at=2026-08-25T00:03:00Z
 typeset -g api_queued_at=2026-08-25T00:01:00Z
 typeset -g frontend_queued_at=2026-08-25T00:02:00Z
 repository_oldest_queued_job_timestamp() {
+  [[ "${2:-general}" != native ]] || return 1
   local queued_at
   case "$1" in
     jai/tonegate) queued_at="$tonegate_queued_at" ;;
@@ -344,6 +412,20 @@ resolve_runner_status() {
 cleanup_runner_vm() { return 0; }
 run_one_ephemeral_runner jai/tonegate
 assert_equal unlocked "$claim_resolution_lock_state"
+(
+  export FAKE_LIMA_REQUEST_LOG="${test_directory}/native-registration.log"
+  acquire_selection_lock jai/trips-frontend
+  native_lock="$selected_repository_lock"
+  cleanup_runner_vm() { print -r -- "$1 $2 $3" > "${test_directory}/native-cleanup"; }
+  run_one_ephemeral_runner jai/trips-frontend native
+  /usr/bin/grep -q -- "--labels 'jai-ci-native'" "$FAKE_LIMA_REQUEST_LOG"
+  if /usr/bin/grep -q -- "--labels 'jai-ci," "$FAKE_LIMA_REQUEST_LOG"; then
+    print -u2 -- 'Focused runners must not accept general jobs'
+    exit 1
+  fi
+  [[ -z "$selected_repository_lock" && ! -d "$native_lock" ]] || exit 1
+  /usr/bin/grep -q '^jai/trips-frontend borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/native-cleanup"
+)
 functions[repository_is_private]="$production_repository_is_private"
 functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
 functions[registration_token]="$production_registration_token"
@@ -422,7 +504,7 @@ for concurrent_slot in a b; do
     TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
     /bin/zsh -c '
       source "$1"
-      repository_oldest_queued_job_timestamp() { print -r -- 2026-08-25T00:00:00Z; }
+      repository_oldest_queued_job_timestamp() { [[ "${2:-general}" != native ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
       next_repository
       print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
       /bin/sleep 0.2
