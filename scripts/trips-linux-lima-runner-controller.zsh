@@ -15,6 +15,7 @@ readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
 readonly general_runner_labels="jai-ci,jai-ci-tonegate"
 readonly native_repository="jai/trips-frontend"
+readonly deploy_repository="jai/trips-frontend"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
 readonly selection_lock_prefix="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
@@ -178,7 +179,7 @@ workflow_run_oldest_queued_job_timestamp() {
     "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
     /usr/bin/python3 -c 'import json,sys
 base={"self-hosted","linux","arm64"}
-supported={"general":({"jai-ci"},{"jai-ci-tonegate"}),"native":({"jai-ci-native"},)}[sys.argv[1]]
+supported={"general":({"jai-ci"},{"jai-ci-tonegate"}),"native":({"jai-ci-native"},),"deploy":({"jai-ci-deploy"},)}[sys.argv[1]]
 jobs=[job for page in json.load(sys.stdin) for job in page.get("jobs",[])]
 matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])} and job.get("created_at")]
 print(min(matches) if matches else "")' "$lane" || return 2
@@ -186,9 +187,11 @@ print(min(matches) if matches else "")' "$lane" || return 2
 
 repository_oldest_queued_job_timestamp() {
   local repository="$1" lane="${2:-general}" workflow="" run_status runs run_id run_created_at head_repository queued_at
-  # Restrict the priority probe to the native workflow, avoiding a second scan
-  # of every regression run in every repository before each registration.
-  [[ "$lane" != native ]] || workflow=maestro-ios.yaml
+  # Probe only the workflow belonging to each priority lane.
+  case "$lane" in
+    native) workflow=maestro-ios.yaml ;;
+    deploy) workflow=deploy.yaml ;;
+  esac
   # GitHub returns each status bucket newest-first. Stop at the first eligible
   # Linux job: selection only needs proof of work, and walking every job in
   # every active workflow delayed runner registration by several minutes.
@@ -221,6 +224,22 @@ next_repository() {
         selected_repository="$native_repository"
         selected_runner_lane=native
         log "reserved ${native_repository} native queue (eligible job queued ${queued_at})"
+        return 0
+      fi
+      reservation_contended=true
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) || return "$lookup_status"
+    fi
+  fi
+  # Keep slot b available for general work while slot a serves web deployment.
+  # Native prepare/seed/cleanup retains first priority on both slots.
+  if [[ "$slot" == a ]] && (( ${repository_list[(Ie)$deploy_repository]} )); then
+    if queued_at=$(repository_oldest_queued_job_timestamp "$deploy_repository" deploy); then
+      if acquire_selection_lock "$deploy_repository"; then
+        selected_repository="$deploy_repository"
+        selected_runner_lane=deploy
+        log "reserved ${deploy_repository} deploy queue (eligible job queued ${queued_at})"
         return 0
       fi
       reservation_contended=true
@@ -637,6 +656,7 @@ run_one_ephemeral_runner() {
   case "$lane" in
     general) runner_labels="$general_runner_labels" ;;
     native) runner_labels=jai-ci-native ;;
+    deploy) runner_labels=jai-ci-deploy ;;
     *) release_selection_lock; return 1 ;;
   esac
   local vm_cleanup_required=false

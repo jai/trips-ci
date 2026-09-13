@@ -21,6 +21,17 @@ if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
       ;;
     queued) print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend' ;;
   esac
+elif [[ "$request" == *'/actions/workflows/deploy.yaml/runs?'* ]]; then
+  case "${FAKE_DEPLOY_SCENARIO:-}" in
+    failure) exit 22 ;;
+    fork) print -r -- $'103\t2026-08-25T00:05:00Z\tuntrusted/fork' ;;
+    in_progress)
+      [[ "$request" != *'status=in_progress'* ]] || print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend'
+      ;;
+    queued) print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend' ;;
+  esac
+elif [[ "$request" == *'/actions/runs/103/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:05:01Z","labels":["self-hosted","linux","ARM64","jai-ci-deploy"]}]}]'
 elif [[ "$request" == *'/actions/runs/102/jobs?'* ]]; then
   print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:04:01Z","labels":["self-hosted","linux","ARM64","jai-ci-native"]}]}]'
 elif [[ "$request" == *'/actions/runs?'* ]]; then
@@ -172,6 +183,48 @@ for native_scenario in queued in_progress; do
   assert_equal native "$selected_runner_lane"
   release_selection_lock
 done
+export FAKE_DEPLOY_SCENARIO=queued
+export FAKE_NATIVE_SCENARIO=queued
+next_repository
+assert_equal native "$selected_runner_lane"
+release_selection_lock
+unset FAKE_NATIVE_SCENARIO
+for deploy_scenario in queued in_progress; do
+  export FAKE_DEPLOY_SCENARIO="$deploy_scenario"
+  next_repository
+  assert_equal jai/trips-frontend "$selected_repository"
+  assert_equal deploy "$selected_runner_lane"
+  release_selection_lock
+done
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 103 general)"
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 103 native)"
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 deploy)"
+export FAKE_DEPLOY_SCENARIO=fork
+export FAKE_GH_REQUEST_LOG="${test_directory}/deploy-fork-requests.log"
+next_repository
+assert_equal general "$selected_runner_lane"
+release_selection_lock
+if /usr/bin/grep -q '/actions/runs/103/jobs?' "$FAKE_GH_REQUEST_LOG"; then
+  print -u2 -- 'Deploy discovery must reject fork runs before inspecting jobs'
+  exit 1
+fi
+unset FAKE_GH_REQUEST_LOG
+export FAKE_DEPLOY_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'Deploy discovery errors must fail closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+export FAKE_DEPLOY_SCENARIO=queued
+env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= /bin/zsh -c '
+  source "$1"
+  next_repository || exit 1
+  [[ "$selected_runner_lane" == general ]] || exit 1
+  release_selection_lock
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+unset FAKE_DEPLOY_SCENARIO
+repository_scan_start_index=1
 export FAKE_NATIVE_SCENARIO=queued
 selection_lock_path jai/trips-frontend
 native_reserved_lock="$REPLY"
@@ -221,7 +274,7 @@ typeset -g tonegate_queued_at=2026-08-25T00:03:00Z
 typeset -g api_queued_at=2026-08-25T00:01:00Z
 typeset -g frontend_queued_at=2026-08-25T00:02:00Z
 repository_oldest_queued_job_timestamp() {
-  [[ "${2:-general}" != native ]] || return 1
+  [[ "${2:-general}" == general ]] || return 1
   local queued_at
   case "$1" in
     jai/tonegate) queued_at="$tonegate_queued_at" ;;
@@ -426,6 +479,20 @@ assert_equal unlocked "$claim_resolution_lock_state"
   [[ -z "$selected_repository_lock" && ! -d "$native_lock" ]] || exit 1
   /usr/bin/grep -q '^jai/trips-frontend borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/native-cleanup"
 )
+(
+  export FAKE_LIMA_REQUEST_LOG="${test_directory}/deploy-registration.log"
+  acquire_selection_lock jai/trips-frontend
+  deploy_lock="$selected_repository_lock"
+  cleanup_runner_vm() { print -r -- "$1 $2 $3" > "${test_directory}/deploy-cleanup"; }
+  run_one_ephemeral_runner jai/trips-frontend deploy
+  /usr/bin/grep -q -- "--labels 'jai-ci-deploy'" "$FAKE_LIMA_REQUEST_LOG"
+  if /usr/bin/grep -q -- "--labels 'jai-ci," "$FAKE_LIMA_REQUEST_LOG"; then
+    print -u2 -- 'Focused runners must not accept general jobs'
+    exit 1
+  fi
+  [[ -z "$selected_repository_lock" && ! -d "$deploy_lock" ]] || exit 1
+  /usr/bin/grep -q '^jai/trips-frontend borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/deploy-cleanup"
+)
 functions[repository_is_private]="$production_repository_is_private"
 functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
 functions[registration_token]="$production_registration_token"
@@ -504,7 +571,7 @@ for concurrent_slot in a b; do
     TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
     /bin/zsh -c '
       source "$1"
-      repository_oldest_queued_job_timestamp() { [[ "${2:-general}" != native ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
+      repository_oldest_queued_job_timestamp() { [[ "${2:-general}" == general ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
       next_repository
       print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
       /bin/sleep 0.2
