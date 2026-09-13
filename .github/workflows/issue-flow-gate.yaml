@@ -36,9 +36,10 @@ permissions:
   pull-requests: read
 
 # Metadata checks are replaceable: each surviving run reads current PR state.
-# Include the caller workflow to avoid cancelling a different required check.
+# Isolate caller workflows and commit SHAs so a stale event cannot cancel a
+# different required check or the check attached to a newer commit.
 concurrency:
-  group: trips-metadata-issue-flow-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: trips-metadata-issue-flow-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
