@@ -160,7 +160,8 @@ repository_workflow_runs() {
   local repository="$1" run_status="$2" workflow="${3:-}" runs_path
   runs_path="repos/${repository}/actions/runs"
   [[ -z "$workflow" ]] || runs_path="repos/${repository}/actions/workflows/${workflow}/runs"
-  "$gh_cli" api \
+  installation_token || return 2
+  GH_TOKEN="$REPLY" "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate \
@@ -171,7 +172,8 @@ repository_workflow_runs() {
 workflow_run_oldest_queued_job_timestamp() {
   setopt local_options pipe_fail
   local repository="$1" run_id="$2" lane="${3:-general}"
-  "$gh_cli" api \
+  installation_token || return 2
+  GH_TOKEN="$REPLY" "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate --slurp \
@@ -710,10 +712,6 @@ main() {
   if ! "$lima_cli" list "$base_vm" --json 2>/dev/null |
     /usr/bin/grep -q '"status":"Stopped"'; then
     log "stopped Lima base ${base_vm} is missing"
-    return 1
-  fi
-  if ! "$gh_cli" auth status >/dev/null 2>&1; then
-    log "GitHub CLI authentication is unavailable"
     return 1
   fi
   for repository in ${(s:,:)repositories}; do

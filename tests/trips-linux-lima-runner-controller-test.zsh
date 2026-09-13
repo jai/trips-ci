@@ -11,6 +11,8 @@ cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+[[ "${GH_TOKEN:-}" == test-token ]] || { print -u2 -- 'Queue reads require the App token'; exit 99; }
+[[ "${FAKE_GH_FAILURE:-false}" != true ]] || exit 22
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
 if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
   case "${FAKE_NATIVE_SCENARIO:-}" in
@@ -48,7 +50,7 @@ if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
   print -r -- '{"runners":[{"id":4242,"name":"page-two-runner","busy":true}]}'
 else
-  print -u2 -- "Unexpected curl request: ${request}"
+  print -u2 -- 'Unexpected curl request in test fixture'
   exit 1
 fi
 SCRIPT
@@ -157,6 +159,14 @@ if /usr/bin/grep -q 'status=in_progress' "$FAKE_GH_REQUEST_LOG"; then
   exit 1
 fi
 unset FAKE_GH_REQUEST_LOG
+export FAKE_GH_FAILURE=true
+if repository_oldest_queued_job_timestamp jai/tonegate; then
+  print -u2 -- 'Queue API failures must propagate'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_GH_FAILURE
 
 export FAKE_SCENARIO=native
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101)"
@@ -206,6 +216,8 @@ repository_scan_start_index=1
 env TRIPS_LINUX_LIMA_REPOSITORIES=jai/tonegate FAKE_NATIVE_SCENARIO=failure \
   /bin/zsh -c '
     source "$1"
+    installation_token_value=test-token
+    installation_token_expires_at=4102444800
     next_repository || exit 1
     [[ "$selected_repository" == jai/tonegate && "$selected_runner_lane" == general ]] || exit 1
     release_selection_lock
