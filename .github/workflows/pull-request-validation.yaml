@@ -18,7 +18,7 @@ permissions:
   issues: read
   pull-requests: write
 
-# Metadata checks are replaceable: only the latest event for each PR matters.
+# Metadata checks are replaceable: each surviving run reads current PR state.
 # Include the caller workflow to avoid cancelling a different required check.
 concurrency:
   group: trips-metadata-pr-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -53,12 +53,18 @@ jobs:
         with:
           github-token: ${{ secrets.CODEX_REVIEW_GH_TOKEN || github.token }}
           script: |
-            const pr = context.payload.pull_request;
-            if (!pr) {
+            const eventPR = context.payload.pull_request;
+            if (!eventPR) {
               core.notice("No pull_request payload; skipping PR body validation.");
               return;
             }
 
+            // Concurrency admission can reorder events. Validate live metadata,
+            // never the stale title/body carried by the surviving event.
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: eventPR.number,
+            });
             const title = pr.title || "";
             const author = pr.user?.login || "";
             const body = pr.body || "";

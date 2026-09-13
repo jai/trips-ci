@@ -35,7 +35,7 @@ permissions:
   issues: read
   pull-requests: read
 
-# Metadata checks are replaceable: only the latest event for each PR matters.
+# Metadata checks are replaceable: each surviving run reads current PR state.
 # Include the caller workflow to avoid cancelling a different required check.
 concurrency:
   group: trips-metadata-issue-flow-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
