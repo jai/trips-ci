@@ -156,12 +156,14 @@ delete_runner_registration() {
     "https://api.github.com/repos/${repository}/actions/runners/${id}" >/dev/null
 }
 
+# next_repository refreshes once in the parent shell. Reuse that token for
+# the whole scan, even if its conservative refresh deadline passes mid-scan.
 repository_workflow_runs() {
   local repository="$1" run_status="$2" workflow="${3:-}" runs_path
   runs_path="repos/${repository}/actions/runs"
   [[ -z "$workflow" ]] || runs_path="repos/${repository}/actions/workflows/${workflow}/runs"
-  installation_token || return 2
-  GH_TOKEN="$REPLY" "$gh_cli" api \
+  [[ -n "$installation_token_value" ]] || return 2
+  GH_TOKEN="$installation_token_value" "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate \
@@ -172,8 +174,8 @@ repository_workflow_runs() {
 workflow_run_oldest_queued_job_timestamp() {
   setopt local_options pipe_fail
   local repository="$1" run_id="$2" lane="${3:-general}"
-  installation_token || return 2
-  GH_TOKEN="$REPLY" "$gh_cli" api \
+  [[ -n "$installation_token_value" ]] || return 2
+  GH_TOKEN="$installation_token_value" "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate --slurp \

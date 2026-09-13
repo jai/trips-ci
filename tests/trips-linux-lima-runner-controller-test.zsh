@@ -162,7 +162,20 @@ else
   assert_equal 2 "$?"
 fi
 assert_equal '' "$selected_repository"
-unset FAKE_TOKEN_ERROR FAKE_TOKEN_LOG
+unset FAKE_TOKEN_ERROR
+# Model the cache deadline crossing immediately after the parent refresh.
+# Nested reads must keep the scan token instead of minting per API request.
+functions[scan_test_installation_token]="${functions[installation_token]}"
+installation_token() {
+  scan_test_installation_token || return $?
+  installation_token_expires_at=0
+}
+next_repository
+release_selection_lock
+assert_equal 3 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+functions[installation_token]="${functions[scan_test_installation_token]}"
+unfunction scan_test_installation_token
+unset FAKE_TOKEN_LOG
 functions[github_jwt]="$production_github_jwt"
 installation_token_value=test-token
 installation_token_expires_at=4102444800

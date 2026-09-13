@@ -189,15 +189,17 @@ repository_is_private() {
     /usr/bin/python3 -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin).get("private") is True else 1)'
 }
 
+# next_repository refreshes once in the parent shell. Reuse that token for
+# the whole scan, even if its conservative refresh deadline passes mid-scan.
 repository_workflow_runs() {
   setopt local_options pipe_fail
   local repository="$1" run_status response page count
   for run_status in queued in_progress; do
     page=1
     while true; do
-      installation_token || return 2
+      [[ -n "$installation_token_value" ]] || return 2
       response=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
-        -H "Authorization: Bearer $REPLY" \
+        -H "Authorization: Bearer $installation_token_value" \
         -H 'Accept: application/vnd.github+json' \
         -H 'X-GitHub-Api-Version: 2022-11-28' \
         "https://api.github.com/repos/${repository}/actions/runs?status=${run_status}&per_page=100&page=${page}") || return 2
@@ -217,9 +219,9 @@ workflow_run_oldest_queued_job_timestamp() {
   local repository="$1" run_id="$2" response page count queued_at oldest_queued_at=""
   page=1
   while true; do
-    installation_token || return 2
+    [[ -n "$installation_token_value" ]] || return 2
     response=$("$curl_cli" -fsS --connect-timeout 10 --max-time 20 \
-      -H "Authorization: Bearer $REPLY" \
+      -H "Authorization: Bearer $installation_token_value" \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
       "https://api.github.com/repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100&page=${page}") || return 2
