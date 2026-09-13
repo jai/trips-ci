@@ -13,7 +13,8 @@ readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
 readonly memory_gib="${TRIPS_LINUX_LIMA_MEMORY_GIB:-8}"
 readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
-readonly runner_labels="jai-ci,jai-ci-tonegate"
+readonly general_runner_labels="jai-ci,jai-ci-tonegate"
+readonly native_repository="jai/trips-frontend"
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
 readonly selection_lock_prefix="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
@@ -38,6 +39,7 @@ readonly package_manager_probe_timeout_seconds="${TRIPS_LINUX_LIMA_PACKAGE_MANAG
 typeset -g installation_token_value=""
 typeset -g installation_token_expires_at=0
 typeset -g selected_repository=""
+typeset -g selected_runner_lane=general
 typeset -g selected_repository_lock=""
 typeset -g active_timeout_pid=""
 typeset -gi repository_scan_start_index=1
@@ -155,41 +157,47 @@ delete_runner_registration() {
 }
 
 repository_workflow_runs() {
-  local repository="$1" run_status="$2"
+  local repository="$1" run_status="$2" workflow="${3:-}" runs_path
+  runs_path="repos/${repository}/actions/runs"
+  [[ -z "$workflow" ]] || runs_path="repos/${repository}/actions/workflows/${workflow}/runs"
   "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate \
-    "repos/${repository}/actions/runs?status=${run_status}&per_page=100" \
+    "${runs_path}?status=${run_status}&per_page=100" \
     --jq '.workflow_runs[] | [.id, .created_at, .head_repository.full_name] | @tsv' || return 2
 }
 
 workflow_run_oldest_queued_job_timestamp() {
   setopt local_options pipe_fail
-  local repository="$1" run_id="$2"
+  local repository="$1" run_id="$2" lane="${3:-general}"
   "$gh_cli" api \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     --paginate --slurp \
     "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
     /usr/bin/python3 -c 'import json,sys
-base={"self-hosted","linux","arm64"}; supported=({"jai-ci"},{"jai-ci-tonegate"})
+base={"self-hosted","linux","arm64"}
+supported={"general":({"jai-ci"},{"jai-ci-tonegate"}),"native":({"jai-ci-native"},)}[sys.argv[1]]
 jobs=[job for page in json.load(sys.stdin) for job in page.get("jobs",[])]
 matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])} and job.get("created_at")]
-print(min(matches) if matches else "")' || return 2
+print(min(matches) if matches else "")' "$lane" || return 2
 }
 
 repository_oldest_queued_job_timestamp() {
-  local repository="$1" run_status runs run_id run_created_at head_repository queued_at
+  local repository="$1" lane="${2:-general}" workflow="" run_status runs run_id run_created_at head_repository queued_at
+  # Restrict the priority probe to the native workflow, avoiding a second scan
+  # of every regression run in every repository before each registration.
+  [[ "$lane" != native ]] || workflow=maestro-ios.yaml
   # GitHub returns each status bucket newest-first. Stop at the first eligible
   # Linux job: selection only needs proof of work, and walking every job in
   # every active workflow delayed runner registration by several minutes.
   for run_status in queued in_progress; do
-    runs=$(repository_workflow_runs "$repository" "$run_status") || return 2
+    runs=$(repository_workflow_runs "$repository" "$run_status" "$workflow") || return 2
     while IFS=$'\t' read -r run_id run_created_at head_repository; do
       [[ -n "$run_id" ]] || continue
       [[ "$head_repository" == "$repository" ]] || continue
-      queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id") || return 2
+      queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id" "$lane") || return 2
       [[ -n "$queued_at" ]] || continue
       print -r -- "$queued_at"
       return 0
@@ -204,8 +212,23 @@ next_repository() {
   local -i lookup_status
   local reservation_contended=false
   selected_repository=""
+  selected_runner_lane=general
   repository_count=${#repository_list[@]}
   (( repository_count > 0 )) || return 1
+  if (( ${repository_list[(Ie)$native_repository]} )); then
+    if queued_at=$(repository_oldest_queued_job_timestamp "$native_repository" native); then
+      if acquire_selection_lock "$native_repository"; then
+        selected_repository="$native_repository"
+        selected_runner_lane=native
+        log "reserved ${native_repository} native queue (eligible job queued ${queued_at})"
+        return 0
+      fi
+      reservation_contended=true
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) || return "$lookup_status"
+    fi
+  fi
   (( repository_scan_start_index > repository_count )) && repository_scan_start_index=1
   for (( offset = 0; offset < repository_count; offset++ )); do
     repository_index=$(((repository_scan_start_index + offset - 1) % repository_count + 1))
@@ -610,7 +633,12 @@ wait_for_guest_package_manager() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name token runner_name runner_pid runner_status claim_result
+  local repository="$1" lane="${2:-general}" runner_labels suffix vm_name token runner_name runner_pid runner_status claim_result
+  case "$lane" in
+    general) runner_labels="$general_runner_labels" ;;
+    native) runner_labels=jai-ci-native ;;
+    *) release_selection_lock; return 1 ;;
+  esac
   local vm_cleanup_required=false
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-linux-runner-${slot}-job-${suffix}"
@@ -705,7 +733,7 @@ main() {
   while true; do
     if next_repository; then
       repository="$selected_repository"
-      if run_one_ephemeral_runner "$repository"; then
+      if run_one_ephemeral_runner "$repository" "$selected_runner_lane"; then
         log "ephemeral runner completed a job for ${repository}"
       else
         log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
