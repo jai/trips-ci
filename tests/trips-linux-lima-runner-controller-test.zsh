@@ -71,6 +71,9 @@ if [[ "$*" == *'sudo -n bash -c '*'/usr/bin/fuser '* ]]; then
   print -r -- "$attempts" > "$attempts_file"
   (( attempts > ${FAKE_PACKAGE_LOCK_BUSY_ATTEMPTS:-0} )) && exit 10 || exit 0
 fi
+if [[ "$1" == shell && "${FAKE_RUNNER_PREFLIGHT_FAILURE:-false}" == true ]]; then
+  exit 23
+fi
 if [[ "$1" == list && "${FAKE_VM_INVENTORY_ERROR:-false}" == true ]]; then
   exit 42
 fi
@@ -292,6 +295,31 @@ assert_equal jai/tonegate "${clone_failure_cleanup[1]}"
   print -u2 -- 'Expected clone failure cleanup to receive the partially created VM name'
   exit 1
 }
+
+(
+  acquire_selection_lock jai/tonegate
+  preflight_lock="$selected_repository_lock"
+  typeset -a preflight_cleanup=()
+  repository_is_private() { return 0; }
+  wait_for_guest_package_manager() { return 0; }
+  registration_token() { touch "${test_directory}/unexpected-registration"; REPLY=test-token; }
+  cleanup_runner_vm() { preflight_cleanup=("$1" "$2" "$3"); }
+  export FAKE_RUNNER_PREFLIGHT_FAILURE=true
+  if run_one_ephemeral_runner jai/tonegate; then
+    print -u2 -- 'Expected failed guest tool preflight to reject the runner cycle'
+    exit 1
+  fi
+  [[ ! -e "${test_directory}/unexpected-registration" ]] || {
+    print -u2 -- 'An unready guest must not obtain a registration token'
+    exit 1
+  }
+  assert_equal jai/tonegate "${preflight_cleanup[1]}"
+  [[ "${preflight_cleanup[3]}" == trips-linux-runner-a-job-* ]] || exit 1
+  [[ -z "$selected_repository_lock" && ! -d "$preflight_lock" ]] || {
+    print -u2 -- 'Failed guest preflight must release the repository reservation'
+    exit 1
+  }
+)
 
 acquire_selection_lock jai/tonegate
 claimed_repository_lock="$selected_repository_lock"
