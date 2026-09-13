@@ -10,42 +10,8 @@ fake_gh="${test_directory}/gh"
 cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
-
-request="$*"
-case "${FAKE_SCENARIO:-}" in
-  tonegate-only)
-    if [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]]; then
-      print -r -- $'101\t2026-08-25T00:00:00Z\tjai/tonegate'
-    elif [[ "$request" == *'repos/jai/tonegate/actions/runs/101/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
-    fi
-    ;;
-  trips-first)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
-    fi
-    ;;
-  incompatible-host)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'303\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/303/jobs?'* ]]; then
-      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}]'
-    fi
-    ;;
-  no-jobs)
-    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
-      print -r -- $'202\t2026-08-25T00:00:00Z\tjai/trips-frontend'
-    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/202/jobs?'* ]]; then
-      print -r -- '[{"jobs":[]}]'
-    fi
-    ;;
-  *)
-    print -u2 -- "Unknown fake scenario"
-    exit 1
-    ;;
-esac
+print -u2 -- 'GitHub CLI must not be used for controller queue discovery'
+exit 99
 SCRIPT
 chmod 700 "$fake_gh"
 
@@ -54,7 +20,62 @@ cat > "$fake_curl" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
-if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
+if [[ "$request" == *'/access_tokens' ]]; then
+  [[ "${FAKE_TOKEN_ERROR:-false}" != true ]] || exit 22
+  print -r -- minted >> "${FAKE_TOKEN_LOG:?}"
+  print -r -- '{"token":"test-token"}'
+  exit 0
+fi
+[[ -n "${FAKE_CURL_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_CURL_LOG"
+scenario="${FAKE_SCENARIO:-}"
+if [[ "$scenario" == api-error ]]; then
+  exit 22
+fi
+if [[ "$scenario" == paginated ]]; then
+  if [[ "$request" == *'repos/jai/tonegate/'* || "$request" == *'status=in_progress'* ]]; then
+    print -r -- '{"workflow_runs":[]}'
+  elif [[ "$request" == *'actions/runs?'* ]]; then
+    if [[ "$request" == *'page=1' ]]; then
+      /usr/bin/python3 -c 'import json; print(json.dumps({"workflow_runs":[{"id":i,"head_repository":{"full_name":"outside/fork"}} for i in range(100)]}))'
+    else
+      print -r -- '{"workflow_runs":[{"id":202,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}'
+    fi
+  elif [[ "$request" == *'actions/runs/202/jobs?'* ]]; then
+    if [[ "$request" == *'page=1' ]]; then
+      /usr/bin/python3 -c 'import json; job={"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}; print(json.dumps({"jobs":[job for _ in range(100)]}))'
+    else
+      [[ "${FAKE_PAGE_TWO_ERROR:-false}" != true ]] || exit 22
+      print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+    fi
+  else
+    exit 1
+  fi
+  exit 0
+fi
+if [[ "$request" == *'actions/runs?status='* ]]; then
+  case "$scenario" in
+    tonegate-only)
+      [[ "$request" == *'repos/jai/tonegate/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":101,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/tonegate"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    trips-first|no-jobs)
+      [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":202,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    incompatible-host)
+      [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]] && print -r -- '{"workflow_runs":[{"id":303,"created_at":"2026-08-25T00:00:00Z","head_repository":{"full_name":"jai/trips-frontend"}}]}' || print -r -- '{"workflow_runs":[]}'
+      ;;
+    *) print -u2 -- "Unknown fake scenario: $scenario"; exit 1 ;;
+  esac
+elif [[ "$request" == *'actions/runs/101/jobs?'* ]]; then
+  print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:01Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+elif [[ "$request" == *'actions/runs/202/jobs?'* ]]; then
+  if [[ "$scenario" == no-jobs ]]; then
+    print -r -- '{"jobs":[]}'
+  else
+    print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:02Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}'
+  fi
+elif [[ "$request" == *'actions/runs/303/jobs?'* ]]; then
+  print -r -- '{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:03Z","labels":["self-hosted","macOS","ARM64","tart","ios","borg-cube-03"]}]}'
+elif [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
   print -r -- '{"runners":[{"id":4343,"name":"page-two-runner","busy":false,"labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"tart"},{"name":"ios"},{"name":"unexpected"}]}]}'
@@ -127,6 +148,7 @@ export TRIPS_TART_ALLOWED_CORESIDENT_VMS='atlas-eve-alpha'
 source "${repo_root}/scripts/trips-tart-runner-controller.zsh"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
+export FAKE_CURL_LOG="${test_directory}/curl.log"
 
 assert_equal() {
   local expected="$1" actual="$2"
@@ -135,6 +157,49 @@ assert_equal() {
     return 1
   fi
 }
+
+# Exercise real token acquisition through nested discovery. Cache updates must
+# survive in the controller shell between scans, including after expiry.
+production_github_jwt="${functions[github_jwt]}"
+github_jwt() { print -r -- test-jwt; }
+export FAKE_TOKEN_LOG="${test_directory}/token-mints.log"
+export FAKE_SCENARIO=trips-first
+installation_token_value=""
+installation_token_expires_at=0
+for scan in 1 2; do
+  next_repository
+done
+assert_equal 1 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+assert_equal test-token "$installation_token_value"
+installation_token_expires_at=0
+next_repository
+
+assert_equal 2 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+installation_token_expires_at=0
+export FAKE_TOKEN_ERROR=true
+if next_repository 2> "${test_directory}/expected-token-error.log"; then
+  print -u2 -- 'Token refresh failure must prevent queue selection'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+assert_equal '' "$selected_repository"
+unset FAKE_TOKEN_ERROR
+# Model the cache deadline crossing immediately after the parent refresh.
+# Nested reads must keep the scan token instead of minting per API request.
+functions[scan_test_installation_token]="${functions[installation_token]}"
+installation_token() {
+  scan_test_installation_token || return $?
+  installation_token_expires_at=0
+}
+next_repository
+assert_equal 3 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+functions[installation_token]="${functions[scan_test_installation_token]}"
+unfunction scan_test_installation_token
+unset FAKE_TOKEN_LOG
+functions[github_jwt]="$production_github_jwt"
+installation_token_value=test-token
+installation_token_expires_at=4102444800
 
 if runner_cycle_status 0 1; then
   print -u2 -- 'Expected cleanup failure to override a successful runner operation'
@@ -212,6 +277,42 @@ export FAKE_SCENARIO=no-jobs
 if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202 | /usr/bin/grep -q .; then
   print -u2 -- 'Expected no matching queued job'
   exit 1
+fi
+/usr/bin/grep -q 'Authorization: Bearer test-token' "$FAKE_CURL_LOG"
+
+# Exercise discovery through parsing and repository selection, without replacing
+# any production queue helper. A valid job must actually start a runner cycle.
+export FAKE_SCENARIO=trips-first
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+export FAKE_SCENARIO=tonegate-only
+next_repository
+assert_equal jai/tonegate "$selected_repository"
+export FAKE_SCENARIO=paginated
+assert_equal 2026-08-25T00:00:01Z "$(repository_oldest_queued_job_timestamp jai/trips-frontend)"
+next_repository
+assert_equal jai/trips-frontend "$selected_repository"
+export FAKE_PAGE_TWO_ERROR=true
+if next_repository; then
+  print -u2 -- 'Partial API results must not dispatch work after a page failure'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_PAGE_TWO_ERROR
+export FAKE_SCENARIO=api-error
+if next_repository; then
+  print -u2 -- 'API errors must propagate through real queue discovery'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+export FAKE_SCENARIO=incompatible-host
+if next_repository; then
+  print -u2 -- 'Incompatible labels must not dispatch a runner'
+  exit 1
+else
+  assert_equal 1 "$?"
 fi
 
 typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"

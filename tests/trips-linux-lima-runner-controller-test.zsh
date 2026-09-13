@@ -11,6 +11,8 @@ cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+[[ "${GH_TOKEN:-}" == test-token ]] || { print -u2 -- 'Queue reads require the App token'; exit 99; }
+[[ "${FAKE_GH_FAILURE:-false}" != true ]] || exit 22
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
 if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
   case "${FAKE_NATIVE_SCENARIO:-}" in
@@ -43,12 +45,18 @@ cat > "$fake_curl" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+if [[ "$request" == *'/access_tokens' ]]; then
+  [[ "${FAKE_TOKEN_ERROR:-false}" != true ]] || exit 22
+  print -r -- minted >> "${FAKE_TOKEN_LOG:?}"
+  print -r -- '{"token":"test-token"}'
+  exit 0
+fi
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
   print -r -- '{"runners":[{"id":4242,"name":"page-two-runner","busy":true}]}'
 else
-  print -u2 -- "Unexpected curl request: ${request}"
+  print -u2 -- 'Unexpected curl request in test fixture'
   exit 1
 fi
 SCRIPT
@@ -127,6 +135,52 @@ assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
 }
 
+# Exercise real token acquisition through nested discovery. Cache updates must
+# survive in the controller shell between scans, including after expiry.
+production_github_jwt="${functions[github_jwt]}"
+github_jwt() { print -r -- test-jwt; }
+export FAKE_TOKEN_LOG="${test_directory}/token-mints.log"
+export FAKE_SCENARIO=standard
+installation_token_value=""
+installation_token_expires_at=0
+for scan in 1 2; do
+  next_repository
+  release_selection_lock
+done
+assert_equal 1 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+assert_equal test-token "$installation_token_value"
+installation_token_expires_at=0
+next_repository
+  release_selection_lock
+assert_equal 2 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+installation_token_expires_at=0
+export FAKE_TOKEN_ERROR=true
+if next_repository 2> "${test_directory}/expected-token-error.log"; then
+  print -u2 -- 'Token refresh failure must prevent queue selection'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+assert_equal '' "$selected_repository"
+unset FAKE_TOKEN_ERROR
+# Model the cache deadline crossing immediately after the parent refresh.
+# Nested reads must keep the scan token instead of minting per API request.
+functions[scan_test_installation_token]="${functions[installation_token]}"
+installation_token() {
+  scan_test_installation_token || return $?
+  installation_token_expires_at=0
+}
+next_repository
+release_selection_lock
+assert_equal 3 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+functions[installation_token]="${functions[scan_test_installation_token]}"
+unfunction scan_test_installation_token
+unset FAKE_TOKEN_LOG
+functions[github_jwt]="$production_github_jwt"
+installation_token_value=test-token
+installation_token_expires_at=4102444800
+repository_scan_start_index=1
+
 if [[ -o pipefail ]]; then
   print -u2 -- 'Controller source must not enable pipefail globally'
   exit 1
@@ -157,6 +211,14 @@ if /usr/bin/grep -q 'status=in_progress' "$FAKE_GH_REQUEST_LOG"; then
   exit 1
 fi
 unset FAKE_GH_REQUEST_LOG
+export FAKE_GH_FAILURE=true
+if repository_oldest_queued_job_timestamp jai/tonegate; then
+  print -u2 -- 'Queue API failures must propagate'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_GH_FAILURE
 
 export FAKE_SCENARIO=native
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101)"
@@ -206,6 +268,8 @@ repository_scan_start_index=1
 env TRIPS_LINUX_LIMA_REPOSITORIES=jai/tonegate FAKE_NATIVE_SCENARIO=failure \
   /bin/zsh -c '
     source "$1"
+    installation_token_value=test-token
+    installation_token_expires_at=4102444800
     next_repository || exit 1
     [[ "$selected_repository" == jai/tonegate && "$selected_runner_lane" == general ]] || exit 1
     release_selection_lock
@@ -504,6 +568,8 @@ for concurrent_slot in a b; do
     TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
     /bin/zsh -c '
       source "$1"
+      installation_token_value=test-token
+      installation_token_expires_at=4102444800
       repository_oldest_queued_job_timestamp() { [[ "${2:-general}" != native ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
       next_repository
       print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
