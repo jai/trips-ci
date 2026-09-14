@@ -12,7 +12,20 @@ cat > "$fake_gh" <<'SCRIPT'
 set -eu
 request="$*"
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
-if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
+if [[ "$request" == *'repos/jai/trips-api/actions/workflows/'* && ( "$request" == *'/release.yaml/runs?'* || "$request" == *'/deploy.yaml/runs?'* ) ]]; then
+  if [[ "$request" == *"/${FAKE_API_RELEASE_WORKFLOW:-release.yaml}/runs?"* ]]; then
+    case "${FAKE_API_RELEASE_SCENARIO:-}" in
+      failure) exit 22 ;;
+      fork) print -r -- $'105\t2026-08-25T00:07:00Z\tuntrusted/fork' ;;
+      in_progress)
+        [[ "$request" != *'status=in_progress'* ]] || print -r -- $'105\t2026-08-25T00:07:00Z\tjai/trips-api'
+        ;;
+      queued) print -r -- $'105\t2026-08-25T00:07:00Z\tjai/trips-api' ;;
+    esac
+  fi
+elif [[ "$request" == *'/actions/runs/105/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:07:01Z","labels":["self-hosted","linux","ARM64","jai-ci-deploy"]}]}]'
+elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
   case "${FAKE_NATIVE_SCENARIO:-}" in
     failure) exit 22 ;;
     fork) print -r -- $'102\t2026-08-25T00:04:00Z\tuntrusted/fork' ;;
@@ -328,6 +341,32 @@ for delivery_scenario in queued in_progress; do
     release_selection_lock
   ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 done
+# API release orchestration and deployment outrank CI on either slot.
+for api_workflow in release.yaml deploy.yaml; do
+  for api_scenario in queued in_progress; do
+    for api_slot in a b; do
+      env TRIPS_LINUX_LIMA_SLOT="$api_slot" FAKE_API_RELEASE_WORKFLOW="$api_workflow" \
+        FAKE_API_RELEASE_SCENARIO="$api_scenario" /bin/zsh -c '
+          source "$1"
+          next_repository || exit 1
+          [[ "$selected_repository" == jai/trips-api && "$selected_runner_lane" == deploy ]] || exit 1
+          release_selection_lock
+        ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+    done
+  done
+done
+export FAKE_API_RELEASE_SCENARIO=fork
+next_repository
+assert_equal delivery "$selected_runner_lane"
+release_selection_lock
+export FAKE_API_RELEASE_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'API release discovery errors must fail closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_API_RELEASE_SCENARIO
 export FAKE_NATIVE_SCENARIO=queued FAKE_DEPLOY_SCENARIO=queued
 next_repository
 assert_equal native "$selected_runner_lane"

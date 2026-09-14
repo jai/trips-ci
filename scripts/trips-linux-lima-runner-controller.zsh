@@ -15,7 +15,7 @@ readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
 readonly general_runner_labels="jai-ci,jai-ci-tonegate"
 readonly native_repository="jai/trips-frontend"
-readonly deploy_repository="jai/trips-frontend"
+readonly -a deploy_repositories=(jai/trips-frontend jai/trips-api)
 readonly private_key="/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 readonly log_directory="/Users/jai/Library/Logs/trips-linux-lima-runner"
 readonly selection_lock_prefix="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runner-selection-lock"
@@ -186,26 +186,33 @@ print(min(matches) if matches else "")' "$lane" || return 2
 }
 
 repository_oldest_queued_job_timestamp() {
-  local repository="$1" lane="${2:-general}" workflow="" run_status runs run_id run_created_at head_repository queued_at
-  # Probe only the workflow belonging to each priority lane.
+  local repository="$1" lane="${2:-general}" workflow run_status runs run_id run_created_at head_repository queued_at
+  local -a workflows=("")
+  # Probe only the workflows belonging to each priority lane. API release
+  # orchestration and image/deployment jobs share the release capability.
   case "$lane" in
-    native) workflow=maestro-ios.yaml ;;
-    deploy) workflow=deploy.yaml ;;
-    delivery) workflow=ci.yaml ;;
+    native) workflows=(maestro-ios.yaml) ;;
+    deploy)
+      workflows=(deploy.yaml)
+      [[ "$repository" != jai/trips-api ]] || workflows+=(release.yaml)
+      ;;
+    delivery) workflows=(ci.yaml) ;;
   esac
   # GitHub returns each status bucket newest-first. Stop at the first eligible
   # Linux job: selection only needs proof of work, and walking every job in
   # every active workflow delayed runner registration by several minutes.
-  for run_status in queued in_progress; do
-    runs=$(repository_workflow_runs "$repository" "$run_status" "$workflow") || return 2
-    while IFS=$'\t' read -r run_id run_created_at head_repository; do
-      [[ -n "$run_id" ]] || continue
-      [[ "$head_repository" == "$repository" ]] || continue
-      queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id" "$lane") || return 2
-      [[ -n "$queued_at" ]] || continue
-      print -r -- "$queued_at"
-      return 0
-    done <<< "$runs"
+  for workflow in "${workflows[@]}"; do
+    for run_status in queued in_progress; do
+      runs=$(repository_workflow_runs "$repository" "$run_status" "$workflow") || return 2
+      while IFS=$'\t' read -r run_id run_created_at head_repository; do
+        [[ -n "$run_id" ]] || continue
+        [[ "$head_repository" == "$repository" ]] || continue
+        queued_at=$(workflow_run_oldest_queued_job_timestamp "$repository" "$run_id" "$lane") || return 2
+        [[ -n "$queued_at" ]] || continue
+        print -r -- "$queued_at"
+        return 0
+      done <<< "$runs"
+    done
   done
   return 1
 }
@@ -233,24 +240,25 @@ next_repository() {
       (( lookup_status == 1 )) || return "$lookup_status"
     fi
   fi
-  # Either idle slot can serve deployment while the other runs a long job.
+  # Either idle slot can serve release work while the other runs a long job.
   # Native prepare/seed/cleanup retains first priority on both slots.
-  if (( ${repository_list[(Ie)$deploy_repository]} )); then
-    if queued_at=$(repository_oldest_queued_job_timestamp "$deploy_repository" deploy); then
-      if acquire_selection_lock "$deploy_repository"; then
-        selected_repository="$deploy_repository"
+  for repository in "${deploy_repositories[@]}"; do
+    (( ${repository_list[(Ie)$repository]} )) || continue
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository" deploy); then
+      if acquire_selection_lock "$repository"; then
+        selected_repository="$repository"
         selected_runner_lane=deploy
-        log "reserved ${deploy_repository} deploy queue (eligible job queued ${queued_at})"
+        log "reserved ${repository} deploy queue (eligible job queued ${queued_at})"
         return 0
       fi
       # The other slot releases this provisioning reservation after job claim.
-      # Retry before taking unrelated work in case the deployment is still queued.
+      # Retry before taking unrelated work in case the release is still queued.
       return 3
     else
       lookup_status=$?
       (( lookup_status == 1 )) || return "$lookup_status"
     fi
-  fi
+  done
   (( repository_scan_start_index > repository_count )) && repository_scan_start_index=1
   # A capability-specific runner cannot be claimed by metadata/review jobs.
   # Limit the priority scan to the API/frontend required CI workflow so this
