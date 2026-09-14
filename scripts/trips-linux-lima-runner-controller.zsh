@@ -232,9 +232,9 @@ next_repository() {
       (( lookup_status == 1 )) || return "$lookup_status"
     fi
   fi
-  # Keep slot b available for general work while slot a serves web deployment.
+  # Either idle slot can serve deployment while the other runs a long job.
   # Native prepare/seed/cleanup retains first priority on both slots.
-  if [[ "$slot" == a ]] && (( ${repository_list[(Ie)$deploy_repository]} )); then
+  if (( ${repository_list[(Ie)$deploy_repository]} )); then
     if queued_at=$(repository_oldest_queued_job_timestamp "$deploy_repository" deploy); then
       if acquire_selection_lock "$deploy_repository"; then
         selected_repository="$deploy_repository"
@@ -242,8 +242,8 @@ next_repository() {
         log "reserved ${deploy_repository} deploy queue (eligible job queued ${queued_at})"
         return 0
       fi
-      # Slot b releases this short provisioning reservation after job claim.
-      # Do not occupy the only deploy slot with unrelated work while waiting.
+      # The other slot releases this provisioning reservation after job claim.
+      # Retry before taking unrelated work in case the deployment is still queued.
       return 3
     else
       lookup_status=$?
