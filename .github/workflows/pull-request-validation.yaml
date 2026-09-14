@@ -29,7 +29,8 @@ jobs:
   validate-pr:
     if: github.event.pull_request.state == 'open'
     name: Validate PR
-    runs-on: ${{ fromJSON(github.repository == 'jai/trips-ci' && '["ubuntu-24.04-arm"]' || '["self-hosted","linux","arm64","jai-ci"]') }}
+    # API/frontend validators have a dedicated capability above optional CI.
+    runs-on: ${{ fromJSON(github.repository == 'jai/trips-ci' && '["ubuntu-24.04-arm"]' || (github.repository == 'jai/trips-api' || github.repository == 'jai/trips-frontend') && '["self-hosted","linux","arm64","jai-ci-validation"]' || '["self-hosted","linux","arm64","jai-ci"]') }}
     steps:
       - name: Validate semantic title
         uses: amannn/action-semantic-pull-request@v6

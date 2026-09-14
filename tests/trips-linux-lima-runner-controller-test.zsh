@@ -43,6 +43,19 @@ elif [[ "$request" == *'/actions/workflows/deploy.yaml/runs?'* ]]; then
       ;;
     queued) print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend' ;;
   esac
+elif [[ "$request" == *'/actions/workflows/pull-request-validation.yaml/runs?'* ]]; then
+  if [[ "$request" == *"repos/${FAKE_VALIDATION_REPOSITORY:-jai/trips-api}/"* ]]; then
+    case "${FAKE_VALIDATION_SCENARIO:-}" in
+      failure) exit 22 ;;
+      fork) print -r -- $'106\t2026-08-25T00:08:00Z\tuntrusted/fork' ;;
+      in_progress)
+        [[ "$request" != *'status=in_progress'* ]] || printf '106\t2026-08-25T00:08:00Z\t%s\n' "${FAKE_VALIDATION_REPOSITORY:-jai/trips-api}"
+        ;;
+      queued) printf '106\t2026-08-25T00:08:00Z\t%s\n' "${FAKE_VALIDATION_REPOSITORY:-jai/trips-api}" ;;
+    esac
+  fi
+elif [[ "$request" == *'/actions/runs/106/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:08:01Z","labels":["self-hosted","linux","ARM64","jai-ci-validation"]}]}]'
 elif [[ "$request" == *'/actions/workflows/ci.yaml/runs?'* ]]; then
   case "${FAKE_DELIVERY_SCENARIO:-}" in
     failure) exit 22 ;;
@@ -324,6 +337,70 @@ if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
   print -u2 -- 'Expected the public trips-ci repository to stay off private self-hosted runners'
   exit 1
 fi
+
+# Required validators must not wait behind a continuous delivery backlog.
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 106 general)"
+for validation_repository in jai/trips-api jai/trips-frontend; do
+  for validation_scenario in queued in_progress; do
+    for validation_slot in a b; do
+      env TRIPS_LINUX_LIMA_SLOT="$validation_slot" FAKE_VALIDATION_REPOSITORY="$validation_repository" \
+        FAKE_VALIDATION_SCENARIO="$validation_scenario" FAKE_DELIVERY_SCENARIO=queued /bin/zsh -c '
+          source "$1"
+          next_repository || exit 1
+          [[ "$selected_repository" == "$FAKE_VALIDATION_REPOSITORY" && "$selected_runner_lane" == validation ]] || {
+            print -u2 -- "Required validator must outrank queued delivery jobs on either slot"
+            exit 1
+          }
+          release_selection_lock
+        ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+    done
+  done
+done
+export FAKE_VALIDATION_SCENARIO=queued
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 101 validation)"
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 104 validation)"
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 106 delivery)"
+export FAKE_NATIVE_SCENARIO=queued FAKE_DEPLOY_SCENARIO=queued
+next_repository
+assert_equal native "$selected_runner_lane"
+release_selection_lock
+unset FAKE_NATIVE_SCENARIO
+next_repository
+assert_equal deploy "$selected_runner_lane"
+release_selection_lock
+unset FAKE_DEPLOY_SCENARIO
+selection_lock_path jai/trips-api
+validation_reserved_lock="$REPLY"
+mkdir "$validation_reserved_lock"
+print -r -- $$ > "${validation_reserved_lock}/pid"
+export FAKE_DELIVERY_SCENARIO=queued
+if next_repository; then
+  print -u2 -- 'Validation contention must retry before delivery or general work'
+  exit 1
+else
+  assert_equal 3 "$?"
+fi
+rm -r "$validation_reserved_lock"
+unset FAKE_DELIVERY_SCENARIO
+export FAKE_VALIDATION_SCENARIO=fork
+export FAKE_GH_REQUEST_LOG="${test_directory}/validation-fork-requests.log"
+next_repository
+assert_equal general "$selected_runner_lane"
+release_selection_lock
+if /usr/bin/grep -q '/actions/runs/106/jobs?' "$FAKE_GH_REQUEST_LOG"; then
+  print -u2 -- 'Validation discovery must reject fork runs before inspecting jobs'
+  exit 1
+fi
+unset FAKE_GH_REQUEST_LOG
+export FAKE_VALIDATION_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'Validation discovery errors must fail closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_VALIDATION_SCENARIO
+repository_scan_start_index=1
 
 # Delivery runners must exclude generic metadata and yield to native/deploy.
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 104 general)"
@@ -645,6 +722,20 @@ assert_equal unlocked "$claim_resolution_lock_state"
   fi
   [[ -z "$selected_repository_lock" && ! -d "$delivery_lock" ]] || exit 1
   /usr/bin/grep -q '^jai/trips-api borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/delivery-cleanup"
+)
+(
+  export FAKE_LIMA_REQUEST_LOG="${test_directory}/validation-registration.log"
+  acquire_selection_lock jai/trips-api
+  validation_lock="$selected_repository_lock"
+  cleanup_runner_vm() { print -r -- "$1 $2 $3" > "${test_directory}/validation-cleanup"; }
+  run_one_ephemeral_runner jai/trips-api validation
+  /usr/bin/grep -q -- "--labels 'jai-ci-validation'" "$FAKE_LIMA_REQUEST_LOG"
+  if /usr/bin/grep -q -- "--labels 'jai-ci," "$FAKE_LIMA_REQUEST_LOG"; then
+    print -u2 -- 'Validation runners must not accept generic metadata jobs'
+    exit 1
+  fi
+  [[ -z "$selected_repository_lock" && ! -d "$validation_lock" ]] || exit 1
+  /usr/bin/grep -q '^jai/trips-api borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/validation-cleanup"
 )
 functions[repository_is_private]="$production_repository_is_private"
 functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
