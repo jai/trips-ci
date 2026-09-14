@@ -202,7 +202,7 @@ deploy_reserved_lock="$REPLY"
 mkdir "$deploy_reserved_lock"
 print -r -- $$ > "${deploy_reserved_lock}/pid"
 if next_repository; then
-  print -u2 -- 'Slot A must retry the pending deploy reservation instead of taking general work'
+  print -u2 -- 'A slot must retry the pending deploy reservation instead of taking general work'
   exit 1
 else
   assert_equal 3 "$?"
@@ -232,8 +232,24 @@ if next_repository; then
 else
   assert_equal 2 "$?"
 fi
-export FAKE_DEPLOY_SCENARIO=queued
-env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= /bin/zsh -c '
+for deploy_scenario in queued in_progress; do
+  env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= FAKE_DEPLOY_SCENARIO="$deploy_scenario" /bin/zsh -c '
+    source "$1"
+    next_repository || exit 1
+    [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == deploy ]] || {
+      print -u2 -- "Idle slot B must serve queued deployment while slot A is occupied"
+      exit 1
+    }
+    release_selection_lock
+  ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+done
+env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO=queued FAKE_DEPLOY_SCENARIO=queued /bin/zsh -c '
+  source "$1"
+  next_repository || exit 1
+  [[ "$selected_runner_lane" == native ]] || exit 1
+  release_selection_lock
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= FAKE_DEPLOY_SCENARIO= /bin/zsh -c '
   source "$1"
   next_repository || exit 1
   [[ "$selected_runner_lane" == general ]] || exit 1
