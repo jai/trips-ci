@@ -34,15 +34,17 @@ elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
       ;;
     queued) print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend' ;;
   esac
-elif [[ "$request" == *'/actions/workflows/deploy.yaml/runs?'* ]]; then
-  case "${FAKE_DEPLOY_SCENARIO:-}" in
-    failure) exit 22 ;;
-    fork) print -r -- $'103\t2026-08-25T00:05:00Z\tuntrusted/fork' ;;
-    in_progress)
-      [[ "$request" != *'status=in_progress'* ]] || print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend'
-      ;;
-    queued) print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend' ;;
-  esac
+elif [[ "$request" == *'/actions/workflows/'* && ( "$request" == *'/deploy.yaml/runs?'* || "$request" == *'/release.yaml/runs?'* ) ]]; then
+  if [[ "$request" == *"/${FAKE_FRONTEND_DEPLOY_WORKFLOW:-deploy.yaml}/runs?"* ]]; then
+    case "${FAKE_DEPLOY_SCENARIO:-}" in
+      failure) exit 22 ;;
+      fork) print -r -- $'103\t2026-08-25T00:05:00Z\tuntrusted/fork' ;;
+      in_progress)
+        [[ "$request" != *'status=in_progress'* ]] || print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend'
+        ;;
+      queued) print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend' ;;
+    esac
+  fi
 elif [[ "$request" == *'/actions/workflows/pull-request-validation.yaml/runs?'* ]]; then
   if [[ "$request" == *"repos/${FAKE_VALIDATION_REPOSITORY:-jai/trips-api}/"* ]]; then
     case "${FAKE_VALIDATION_SCENARIO:-}" in
@@ -418,6 +420,34 @@ for delivery_scenario in queued in_progress; do
     release_selection_lock
   ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 done
+# Frontend publication must share deployment priority on either slot.
+for frontend_workflow in release.yaml deploy.yaml; do
+  for frontend_scenario in queued in_progress; do
+    for frontend_slot in a b; do
+      env TRIPS_LINUX_LIMA_SLOT="$frontend_slot" FAKE_FRONTEND_DEPLOY_WORKFLOW="$frontend_workflow" \
+        FAKE_DEPLOY_SCENARIO="$frontend_scenario" /bin/zsh -c '
+          source "$1"
+          next_repository || exit 1
+          [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == deploy ]] || {
+            print -u2 -- "Frontend publication must outrank queued CI"
+            exit 1
+          }
+          release_selection_lock
+        ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+    done
+  done
+done
+env FAKE_FRONTEND_DEPLOY_WORKFLOW=release.yaml FAKE_DEPLOY_SCENARIO=fork /bin/zsh -c '
+  source "$1"
+  next_repository || exit 1
+  [[ "$selected_runner_lane" == delivery ]] || exit 1
+  release_selection_lock
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+env FAKE_FRONTEND_DEPLOY_WORKFLOW=release.yaml FAKE_DEPLOY_SCENARIO=failure /bin/zsh -c '
+  source "$1"
+  if next_repository; then exit 1; else [[ "$?" == 2 ]] || exit 1; fi
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+
 # API release orchestration and deployment outrank CI on either slot.
 for api_workflow in release.yaml deploy.yaml; do
   for api_scenario in queued in_progress; do

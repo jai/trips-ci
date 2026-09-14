@@ -188,13 +188,12 @@ print(min(matches) if matches else "")' "$lane" || return 2
 repository_oldest_queued_job_timestamp() {
   local repository="$1" lane="${2:-general}" workflow run_status runs run_id run_created_at head_repository queued_at
   local -a workflows=("")
-  # Probe only the workflows belonging to each priority lane. API release
+  # Probe only the workflows belonging to each priority lane. Release
   # orchestration and image/deployment jobs share the release capability.
   case "$lane" in
     native) workflows=(maestro-ios.yaml) ;;
     deploy)
-      workflows=(deploy.yaml)
-      [[ "$repository" != jai/trips-api ]] || workflows+=(release.yaml)
+      workflows=(deploy.yaml release.yaml)
       ;;
     validation) workflows=(pull-request-validation.yaml) ;;
     delivery) workflows=(ci.yaml) ;;
