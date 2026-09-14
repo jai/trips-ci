@@ -179,7 +179,7 @@ workflow_run_oldest_queued_job_timestamp() {
     "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" |
     /usr/bin/python3 -c 'import json,sys
 base={"self-hosted","linux","arm64"}
-supported={"general":({"jai-ci"},{"jai-ci-tonegate"}),"native":({"jai-ci-native"},),"deploy":({"jai-ci-deploy"},),"delivery":({"jai-ci-delivery"},)}[sys.argv[1]]
+supported={"general":({"jai-ci"},{"jai-ci-tonegate"}),"native":({"jai-ci-native"},),"deploy":({"jai-ci-deploy"},),"validation":({"jai-ci-validation"},),"delivery":({"jai-ci-delivery"},)}[sys.argv[1]]
 jobs=[job for page in json.load(sys.stdin) for job in page.get("jobs",[])]
 matches=[job.get("created_at","") for job in jobs if job.get("status") == "queued" and ({str(label).lower() for label in job.get("labels",[])}-base) in supported and base <= {str(label).lower() for label in job.get("labels",[])} and job.get("created_at")]
 print(min(matches) if matches else "")' "$lane" || return 2
@@ -196,6 +196,7 @@ repository_oldest_queued_job_timestamp() {
       workflows=(deploy.yaml)
       [[ "$repository" != jai/trips-api ]] || workflows+=(release.yaml)
       ;;
+    validation) workflows=(pull-request-validation.yaml) ;;
     delivery) workflows=(ci.yaml) ;;
   esac
   # GitHub returns each status bucket newest-first. Stop at the first eligible
@@ -221,7 +222,7 @@ next_repository() {
   local repository queued_at
   local -i repository_count offset repository_index
   local -i lookup_status
-  local reservation_contended=false delivery_contended=false
+  local reservation_contended=false validation_contended=false delivery_contended=false
   selected_repository=""
   selected_runner_lane=general
   repository_count=${#repository_list[@]}
@@ -260,6 +261,27 @@ next_repository() {
     fi
   done
   (( repository_scan_start_index > repository_count )) && repository_scan_start_index=1
+  # Required PR validators must get an exclusive runner before CI's optional
+  # regressions. Generic runners can be claimed by unrelated metadata jobs.
+  for (( offset = 0; offset < repository_count; offset++ )); do
+    repository_index=$(((repository_scan_start_index + offset - 1) % repository_count + 1))
+    repository="${repository_list[$repository_index]}"
+    [[ "$repository" == jai/trips-api || "$repository" == jai/trips-frontend ]] || continue
+    if queued_at=$(repository_oldest_queued_job_timestamp "$repository" validation); then
+      if acquire_selection_lock "$repository"; then
+        selected_repository="$repository"
+        selected_runner_lane=validation
+        repository_scan_start_index=$((repository_index % repository_count + 1))
+        log "reserved ${repository} validation queue (eligible job queued ${queued_at})"
+        return 0
+      fi
+      validation_contended=true
+    else
+      lookup_status=$?
+      (( lookup_status == 1 )) || return "$lookup_status"
+    fi
+  done
+  [[ "$validation_contended" == true ]] && return 3
   # A capability-specific runner cannot be claimed by metadata/review jobs.
   # Limit the priority scan to the API/frontend required CI workflow so this
   # adds a bounded lookup, preserving native and deploy priority above it.
@@ -692,6 +714,7 @@ run_one_ephemeral_runner() {
     general) runner_labels="$general_runner_labels" ;;
     native) runner_labels=jai-ci-native ;;
     deploy) runner_labels=jai-ci-deploy ;;
+    validation) runner_labels=jai-ci-validation ;;
     delivery) runner_labels=jai-ci-delivery ;;
     *) release_selection_lock; return 1 ;;
   esac

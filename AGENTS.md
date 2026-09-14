@@ -12,6 +12,7 @@
 - Typical workflows include `pull-request-validation.yaml` (the canonical PR check covering semantic title, PR-issue linking, and required checks), `code-review*.yaml` (Codex review orchestration), `auto-merge.yaml`, `coverage-octocov.yml`, `issue-flow-gate.yaml`, `pr-image-check.yaml`, and `validate-workflows.yaml`.
 - Runner controllers that execute all private Trips CI on Jai's laptop `borg-cube-03`:
   - `scripts/trips-linux-lima-runner-controller.zsh` — two ephemeral Lima Ubuntu ARM64 slots (`a`, `b`), labels `self-hosted, linux, arm64, jai-ci`.
+    API/frontend required PR validators use the exclusive `jai-ci-validation` capability. Both slots select native preparation, deployment, validation, delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
   - `scripts/trips-tart-runner-controller.zsh` — one ephemeral macOS Tart slot for iOS build / TestFlight / Maestro, labels `self-hosted, macOS, ARM64, tart, ios`.
   - `scripts/trips-android-host-runner-controller.zsh` — ephemeral Android host runner, labels `self-hosted, macOS, ARM64, borg-cube-03, android`; shares the native lane lock with iOS.
   - `launchd/*.plist` keep the controllers running headlessly; `scripts/provision-*-runner-base.zsh` build the base images.
