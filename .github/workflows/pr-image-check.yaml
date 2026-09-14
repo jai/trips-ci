@@ -11,9 +11,10 @@ permissions:
   contents: read
   pull-requests: read
 
+# Keep head attribution when old metadata events arrive out of order.
 # Separate from the caller group to avoid reusable-workflow self-cancellation.
 concurrency:
-  group: trips-metadata-images-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: trips-metadata-images-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
