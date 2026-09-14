@@ -12,7 +12,20 @@ cat > "$fake_gh" <<'SCRIPT'
 set -eu
 request="$*"
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
-if [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
+if [[ "$request" == *'repos/jai/trips-api/actions/workflows/'* && ( "$request" == *'/release.yaml/runs?'* || "$request" == *'/deploy.yaml/runs?'* ) ]]; then
+  if [[ "$request" == *"/${FAKE_API_RELEASE_WORKFLOW:-release.yaml}/runs?"* ]]; then
+    case "${FAKE_API_RELEASE_SCENARIO:-}" in
+      failure) exit 22 ;;
+      fork) print -r -- $'105\t2026-08-25T00:07:00Z\tuntrusted/fork' ;;
+      in_progress)
+        [[ "$request" != *'status=in_progress'* ]] || print -r -- $'105\t2026-08-25T00:07:00Z\tjai/trips-api'
+        ;;
+      queued) print -r -- $'105\t2026-08-25T00:07:00Z\tjai/trips-api' ;;
+    esac
+  fi
+elif [[ "$request" == *'/actions/runs/105/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:07:01Z","labels":["self-hosted","linux","ARM64","jai-ci-deploy"]}]}]'
+elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
   case "${FAKE_NATIVE_SCENARIO:-}" in
     failure) exit 22 ;;
     fork) print -r -- $'102\t2026-08-25T00:04:00Z\tuntrusted/fork' ;;
@@ -30,6 +43,17 @@ elif [[ "$request" == *'/actions/workflows/deploy.yaml/runs?'* ]]; then
       ;;
     queued) print -r -- $'103\t2026-08-25T00:05:00Z\tjai/trips-frontend' ;;
   esac
+elif [[ "$request" == *'/actions/workflows/ci.yaml/runs?'* ]]; then
+  case "${FAKE_DELIVERY_SCENARIO:-}" in
+    failure) exit 22 ;;
+    fork) print -r -- $'104\t2026-08-25T00:06:00Z\tuntrusted/fork' ;;
+    in_progress)
+      [[ "$request" != *'status=in_progress'* ]] || print -r -- $'104\t2026-08-25T00:06:00Z\tjai/trips-api'
+      ;;
+    queued) print -r -- $'104\t2026-08-25T00:06:00Z\tjai/trips-api' ;;
+  esac
+elif [[ "$request" == *'/actions/runs/104/jobs?'* ]]; then
+  print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:06:01Z","labels":["self-hosted","linux","ARM64","jai-ci-delivery"]}]}]'
 elif [[ "$request" == *'/actions/runs/103/jobs?'* ]]; then
   print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:05:01Z","labels":["self-hosted","linux","ARM64","jai-ci-deploy"]}]}]'
 elif [[ "$request" == *'/actions/runs/102/jobs?'* ]]; then
@@ -301,6 +325,88 @@ if [[ ",${repositories}," == *',jai/trips-ci,'* ]]; then
   exit 1
 fi
 
+# Delivery runners must exclude generic metadata and yield to native/deploy.
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 104 general)"
+assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-api 101 delivery)"
+for delivery_scenario in queued in_progress; do
+  export FAKE_DELIVERY_SCENARIO="$delivery_scenario"
+  next_repository
+  assert_equal jai/trips-api "$selected_repository"
+  assert_equal delivery "$selected_runner_lane"
+  release_selection_lock
+  env TRIPS_LINUX_LIMA_SLOT=b /bin/zsh -c '
+    source "$1"
+    next_repository || exit 1
+    [[ "$selected_repository" == jai/trips-api && "$selected_runner_lane" == delivery ]] || exit 1
+    release_selection_lock
+  ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+done
+# API release orchestration and deployment outrank CI on either slot.
+for api_workflow in release.yaml deploy.yaml; do
+  for api_scenario in queued in_progress; do
+    for api_slot in a b; do
+      env TRIPS_LINUX_LIMA_SLOT="$api_slot" FAKE_API_RELEASE_WORKFLOW="$api_workflow" \
+        FAKE_API_RELEASE_SCENARIO="$api_scenario" /bin/zsh -c '
+          source "$1"
+          next_repository || exit 1
+          [[ "$selected_repository" == jai/trips-api && "$selected_runner_lane" == deploy ]] || exit 1
+          release_selection_lock
+        ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+    done
+  done
+done
+export FAKE_API_RELEASE_SCENARIO=fork
+next_repository
+assert_equal delivery "$selected_runner_lane"
+release_selection_lock
+export FAKE_API_RELEASE_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'API release discovery errors must fail closed'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_API_RELEASE_SCENARIO
+export FAKE_NATIVE_SCENARIO=queued FAKE_DEPLOY_SCENARIO=queued
+next_repository
+assert_equal native "$selected_runner_lane"
+release_selection_lock
+unset FAKE_NATIVE_SCENARIO
+next_repository
+assert_equal deploy "$selected_runner_lane"
+release_selection_lock
+unset FAKE_DEPLOY_SCENARIO
+selection_lock_path jai/trips-api
+delivery_reserved_lock="$REPLY"
+mkdir "$delivery_reserved_lock"
+print -r -- $$ > "${delivery_reserved_lock}/pid"
+if next_repository; then
+  print -u2 -- 'Delivery contention must retry before generic metadata work'
+  exit 1
+else
+  assert_equal 3 "$?"
+fi
+rm -r "$delivery_reserved_lock"
+export FAKE_DELIVERY_SCENARIO=fork
+export FAKE_GH_REQUEST_LOG="${test_directory}/delivery-fork-requests.log"
+next_repository
+assert_equal general "$selected_runner_lane"
+release_selection_lock
+if /usr/bin/grep -q '/actions/runs/104/jobs?' "$FAKE_GH_REQUEST_LOG"; then
+  print -u2 -- 'Delivery discovery must reject fork runs before inspecting jobs'
+  exit 1
+fi
+unset FAKE_GH_REQUEST_LOG
+export FAKE_DELIVERY_SCENARIO=failure
+if next_repository; then
+  print -u2 -- 'Delivery API failure must not silently select background work'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_DELIVERY_SCENARIO
+repository_scan_start_index=1
+
 typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
 typeset -g tonegate_queued_at=2026-08-25T00:03:00Z
 typeset -g api_queued_at=2026-08-25T00:01:00Z
@@ -433,6 +539,7 @@ if run_one_ephemeral_runner jai/tonegate; then
   exit 1
 fi
 unset FAKE_CLONE_FAILURE
+
 functions[repository_is_private]="$production_repository_is_private"
 functions[cleanup_runner_vm]="$production_cleanup_runner_vm"
 if [[ -n "$selected_repository_lock" || -d "$ownerless_tonegate_lock" ]]; then
@@ -524,6 +631,20 @@ assert_equal unlocked "$claim_resolution_lock_state"
   fi
   [[ -z "$selected_repository_lock" && ! -d "$deploy_lock" ]] || exit 1
   /usr/bin/grep -q '^jai/trips-frontend borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/deploy-cleanup"
+)
+(
+  export FAKE_LIMA_REQUEST_LOG="${test_directory}/delivery-registration.log"
+  acquire_selection_lock jai/trips-api
+  delivery_lock="$selected_repository_lock"
+  cleanup_runner_vm() { print -r -- "$1 $2 $3" > "${test_directory}/delivery-cleanup"; }
+  run_one_ephemeral_runner jai/trips-api delivery
+  /usr/bin/grep -q -- "--labels 'jai-ci-delivery'" "$FAKE_LIMA_REQUEST_LOG"
+  if /usr/bin/grep -q -- "--labels 'jai-ci," "$FAKE_LIMA_REQUEST_LOG"; then
+    print -u2 -- 'Delivery runners must not accept generic metadata jobs'
+    exit 1
+  fi
+  [[ -z "$selected_repository_lock" && ! -d "$delivery_lock" ]] || exit 1
+  /usr/bin/grep -q '^jai/trips-api borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/delivery-cleanup"
 )
 functions[repository_is_private]="$production_repository_is_private"
 functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
