@@ -191,7 +191,7 @@ repository_oldest_queued_job_timestamp() {
   # Probe only the workflows belonging to each priority lane. Release
   # orchestration and image/deployment jobs share the release capability.
   case "$lane" in
-    native) workflows=(maestro-ios.yaml) ;;
+    native) workflows=(maestro-ios.yaml candidate-live-timeline-anchor.yaml) ;;
     deploy)
       workflows=(deploy.yaml release.yaml)
       ;;

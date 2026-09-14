@@ -25,7 +25,8 @@ if [[ "$request" == *'repos/jai/trips-api/actions/workflows/'* && ( "$request" =
   fi
 elif [[ "$request" == *'/actions/runs/105/jobs?'* ]]; then
   print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:07:01Z","labels":["self-hosted","linux","ARM64","jai-ci-deploy"]}]}]'
-elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
+elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* || "$request" == *'/actions/workflows/candidate-live-timeline-anchor.yaml/runs?'* ]]; then
+  if [[ "$request" == *"/${FAKE_NATIVE_WORKFLOW:-maestro-ios.yaml}/runs?"* ]]; then
   case "${FAKE_NATIVE_SCENARIO:-}" in
     failure) exit 22 ;;
     fork) print -r -- $'102\t2026-08-25T00:04:00Z\tuntrusted/fork' ;;
@@ -34,6 +35,7 @@ elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* ]]; then
       ;;
     queued) print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend' ;;
   esac
+  fi
 elif [[ "$request" == *'/actions/workflows/'* && ( "$request" == *'/deploy.yaml/runs?'* || "$request" == *'/release.yaml/runs?'* ) ]]; then
   if [[ "$request" == *"/${FAKE_FRONTEND_DEPLOY_WORKFLOW:-deploy.yaml}/runs?"* ]]; then
     case "${FAKE_DEPLOY_SCENARIO:-}" in
@@ -420,6 +422,32 @@ for delivery_scenario in queued in_progress; do
     release_selection_lock
   ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 done
+# Focused live fixtures share native priority and cannot be stolen by metadata.
+for focused_state in queued in_progress; do
+  for focused_slot in a b; do
+    env TRIPS_LINUX_LIMA_SLOT="$focused_slot" FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml \
+      FAKE_NATIVE_SCENARIO="$focused_state" FAKE_DEPLOY_SCENARIO=queued /bin/zsh -c '
+        source "$1"
+        next_repository || exit 1
+        [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == native ]] || {
+          print -u2 -- "Focused live validation must use native priority on either slot"
+          exit 1
+        }
+        release_selection_lock
+      ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+  done
+done
+env FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml FAKE_NATIVE_SCENARIO=fork /bin/zsh -c '
+  source "$1"
+  next_repository || exit 1
+  [[ "$selected_runner_lane" == delivery ]] || exit 1
+  release_selection_lock
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+env FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml FAKE_NATIVE_SCENARIO=failure /bin/zsh -c '
+  source "$1"
+  if next_repository; then exit 1; else [[ "$?" == 2 ]] || exit 1; fi
+' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
+
 # Frontend publication must share deployment priority on either slot.
 for frontend_workflow in release.yaml deploy.yaml; do
   for frontend_scenario in queued in_progress; do
