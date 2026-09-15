@@ -286,6 +286,72 @@ fi
 assert_equal 17 "$guest_preflight_status"
 assert_equal 'guest-preflight failed stage=java status=17' "$guest_preflight_output"
 
+# Exercise the exact guest scripts with an isolated clock and runner directory.
+export FAKE_CLOCK_FILE="${test_directory}/clock"
+export FAKE_CLOCK_SET_LOG="${test_directory}/clock-set"
+cat > "${fake_guest_bin}/date" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+if [[ "$*" == '+%s' ]]; then
+  cat "$FAKE_CLOCK_FILE"
+elif [[ "$1 $2 $3" == '-u -f %s' ]]; then
+  print -r -- "$4" >> "$FAKE_CLOCK_SET_LOG"
+  [[ "${FAKE_CLOCK_SET_FAIL:-false}" != true ]] || exit 19
+  [[ "${FAKE_CLOCK_STAYS_STALE:-false}" == true ]] || print -r -- "$4" > "$FAKE_CLOCK_FILE"
+else
+  exit 64
+fi
+SCRIPT
+cat > "${fake_guest_bin}/sudo" <<'SCRIPT'
+#!/bin/zsh
+exec "$@"
+SCRIPT
+chmod 700 "${fake_guest_bin}/date" "${fake_guest_bin}/sudo"
+clock_command=$(guest_clock_sync_command 2000000000)
+for initial_clock in 1990000000 2010000000; do
+  print -r -- "$initial_clock" > "$FAKE_CLOCK_FILE"
+  PATH="${fake_guest_bin}:$PATH" zsh -c "set -e; $clock_command"
+  assert_equal 2000000000 "$(cat "$FAKE_CLOCK_FILE")"
+done
+assert_equal 2 "$(wc -l < "$FAKE_CLOCK_SET_LOG" | tr -d ' ')"
+print -r -- 2000000020 > "$FAKE_CLOCK_FILE"
+PATH="${fake_guest_bin}:$PATH" zsh -c "set -e; $clock_command"
+assert_equal 2 "$(wc -l < "$FAKE_CLOCK_SET_LOG" | tr -d ' ')"
+for failure_mode in FAKE_CLOCK_SET_FAIL FAKE_CLOCK_STAYS_STALE; do
+  print -r -- 1990000000 > "$FAKE_CLOCK_FILE"
+  if env "$failure_mode=true" PATH="${fake_guest_bin}:$PATH" zsh -c "set -e; $clock_command"; then
+    print -u2 -- "Expected guest clock correction to fail: $failure_mode"
+    exit 1
+  fi
+done
+if guest_clock_sync_command 'not-an-epoch'; then
+  print -u2 -- 'Expected invalid host epoch to fail before guest execution'
+  exit 1
+fi
+
+fake_runner_directory="${test_directory}/registration"
+mkdir -p "$fake_runner_directory"
+cat > "${fake_runner_directory}/config.sh" <<'SCRIPT'
+#!/bin/zsh
+exit "${FAKE_CONFIG_EXIT:-0}"
+SCRIPT
+cat > "${fake_runner_directory}/run.sh" <<'SCRIPT'
+#!/bin/zsh
+touch ran
+exit 0
+SCRIPT
+chmod 700 "${fake_runner_directory}/config.sh" "${fake_runner_directory}/run.sh"
+runner_start_script=$(guest_runner_start_script)
+if (cd "$fake_runner_directory"; FAKE_CONFIG_EXIT=42 zsh -c "$runner_start_script; configure_and_run --ephemeral"); then
+  print -u2 -- 'Expected runner configuration failure to stop startup'
+  exit 1
+else
+  assert_equal 42 "$?"
+fi
+[[ ! -e "${fake_runner_directory}/ran" ]]
+(cd "$fake_runner_directory"; zsh -c "$runner_start_script; configure_and_run --ephemeral")
+[[ -e "${fake_runner_directory}/ran" ]]
+
 runner_lookup 'jai/trips-frontend' 'page-two-runner'
 assert_equal $'4343\tidle\tself-hosted,macos,arm64,tart,ios,unexpected' "$REPLY"
 runner_busy_state 'jai/trips-frontend' 'page-two-runner'
