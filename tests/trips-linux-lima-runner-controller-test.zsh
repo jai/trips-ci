@@ -11,6 +11,8 @@ cat > "$fake_gh" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+[[ "${GH_TOKEN:-}" == test-token ]] || { print -u2 -- 'Queue reads require the App token'; exit 99; }
+[[ "${FAKE_GH_FAILURE:-false}" != true ]] || exit 22
 [[ -n "${FAKE_GH_REQUEST_LOG:-}" ]] && print -r -- "$request" >> "$FAKE_GH_REQUEST_LOG"
 if [[ "$request" == *'repos/jai/trips-api/actions/workflows/'* && ( "$request" == *'/release.yaml/runs?'* || "$request" == *'/deploy.yaml/runs?'* ) ]]; then
   if [[ "$request" == *"/${FAKE_API_RELEASE_WORKFLOW:-release.yaml}/runs?"* ]]; then
@@ -95,6 +97,12 @@ cat > "$fake_curl" <<'SCRIPT'
 #!/bin/zsh
 set -eu
 request="$*"
+if [[ "$request" == *'/access_tokens' ]]; then
+  [[ "${FAKE_TOKEN_ERROR:-false}" != true ]] || exit 22
+  print -r -- minted >> "${FAKE_TOKEN_LOG:?}"
+  print -r -- '{"token":"test-token"}'
+  exit 0
+fi
 if [[ "$request" == *'actions/runners?per_page=100&page=1'* ]]; then
   /usr/bin/python3 -c 'import json; print(json.dumps({"runners":[{"id":i,"name":f"other-{i}","busy":False} for i in range(100)]}))'
 elif [[ "$request" == *'actions/runners?per_page=100&page=2'* ]]; then
@@ -179,6 +187,52 @@ assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
 }
 
+# Exercise real token acquisition through nested discovery. Cache updates must
+# survive in the controller shell between scans, including after expiry.
+production_github_jwt="${functions[github_jwt]}"
+github_jwt() { print -r -- test-jwt; }
+export FAKE_TOKEN_LOG="${test_directory}/token-mints.log"
+export FAKE_SCENARIO=standard
+installation_token_value=""
+installation_token_expires_at=0
+for scan in 1 2; do
+  next_repository
+  release_selection_lock
+done
+assert_equal 1 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+assert_equal test-token "$installation_token_value"
+installation_token_expires_at=0
+next_repository
+  release_selection_lock
+assert_equal 2 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+installation_token_expires_at=0
+export FAKE_TOKEN_ERROR=true
+if next_repository 2> "${test_directory}/expected-token-error.log"; then
+  print -u2 -- 'Token refresh failure must prevent queue selection'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+assert_equal '' "$selected_repository"
+unset FAKE_TOKEN_ERROR
+# Model the cache deadline crossing immediately after the parent refresh.
+# Nested reads must keep the scan token instead of minting per API request.
+functions[scan_test_installation_token]="${functions[installation_token]}"
+installation_token() {
+  scan_test_installation_token || return $?
+  installation_token_expires_at=0
+}
+next_repository
+release_selection_lock
+assert_equal 3 "$(/usr/bin/wc -l < "$FAKE_TOKEN_LOG" | /usr/bin/tr -d ' ')"
+functions[installation_token]="${functions[scan_test_installation_token]}"
+unfunction scan_test_installation_token
+unset FAKE_TOKEN_LOG
+functions[github_jwt]="$production_github_jwt"
+installation_token_value=test-token
+installation_token_expires_at=4102444800
+repository_scan_start_index=1
+
 if [[ -o pipefail ]]; then
   print -u2 -- 'Controller source must not enable pipefail globally'
   exit 1
@@ -209,6 +263,14 @@ if /usr/bin/grep -q 'status=in_progress' "$FAKE_GH_REQUEST_LOG"; then
   exit 1
 fi
 unset FAKE_GH_REQUEST_LOG
+export FAKE_GH_FAILURE=true
+if repository_oldest_queued_job_timestamp jai/tonegate; then
+  print -u2 -- 'Queue API failures must propagate'
+  exit 1
+else
+  assert_equal 2 "$?"
+fi
+unset FAKE_GH_FAILURE
 
 export FAKE_SCENARIO=native
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101)"
@@ -276,6 +338,8 @@ fi
 for deploy_scenario in queued in_progress; do
   env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= FAKE_DEPLOY_SCENARIO="$deploy_scenario" /bin/zsh -c '
     source "$1"
+    installation_token_value=test-token
+    installation_token_expires_at=4102444800
     next_repository || exit 1
     [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == deploy ]] || {
       print -u2 -- "Idle slot B must serve queued deployment while slot A is occupied"
@@ -286,12 +350,16 @@ for deploy_scenario in queued in_progress; do
 done
 env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO=queued FAKE_DEPLOY_SCENARIO=queued /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   next_repository || exit 1
   [[ "$selected_runner_lane" == native ]] || exit 1
   release_selection_lock
 ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 env TRIPS_LINUX_LIMA_SLOT=b FAKE_NATIVE_SCENARIO= FAKE_DEPLOY_SCENARIO= /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   next_repository || exit 1
   [[ "$selected_runner_lane" == general ]] || exit 1
   release_selection_lock
@@ -332,6 +400,8 @@ repository_scan_start_index=1
 env TRIPS_LINUX_LIMA_REPOSITORIES=jai/tonegate FAKE_NATIVE_SCENARIO=failure \
   /bin/zsh -c '
     source "$1"
+    installation_token_value=test-token
+    installation_token_expires_at=4102444800
     next_repository || exit 1
     [[ "$selected_repository" == jai/tonegate && "$selected_runner_lane" == general ]] || exit 1
     release_selection_lock
@@ -350,6 +420,8 @@ for validation_repository in jai/trips-api jai/trips-frontend; do
       env TRIPS_LINUX_LIMA_SLOT="$validation_slot" FAKE_VALIDATION_REPOSITORY="$validation_repository" \
         FAKE_VALIDATION_SCENARIO="$validation_scenario" FAKE_DELIVERY_SCENARIO=queued /bin/zsh -c '
           source "$1"
+          installation_token_value=test-token
+          installation_token_expires_at=4102444800
           next_repository || exit 1
           [[ "$selected_repository" == "$FAKE_VALIDATION_REPOSITORY" && "$selected_runner_lane" == validation ]] || {
             print -u2 -- "Required validator must outrank queued delivery jobs on either slot"
@@ -417,6 +489,8 @@ for delivery_scenario in queued in_progress; do
   release_selection_lock
   env TRIPS_LINUX_LIMA_SLOT=b /bin/zsh -c '
     source "$1"
+    installation_token_value=test-token
+    installation_token_expires_at=4102444800
     next_repository || exit 1
     [[ "$selected_repository" == jai/trips-api && "$selected_runner_lane" == delivery ]] || exit 1
     release_selection_lock
@@ -428,6 +502,8 @@ for focused_state in queued in_progress; do
     env TRIPS_LINUX_LIMA_SLOT="$focused_slot" FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml \
       FAKE_NATIVE_SCENARIO="$focused_state" FAKE_DEPLOY_SCENARIO=queued /bin/zsh -c '
         source "$1"
+        installation_token_value=test-token
+        installation_token_expires_at=4102444800
         next_repository || exit 1
         [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == native ]] || {
           print -u2 -- "Focused live validation must use native priority on either slot"
@@ -439,12 +515,16 @@ for focused_state in queued in_progress; do
 done
 env FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml FAKE_NATIVE_SCENARIO=fork /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   next_repository || exit 1
   [[ "$selected_runner_lane" == delivery ]] || exit 1
   release_selection_lock
 ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 env FAKE_NATIVE_WORKFLOW=candidate-live-timeline-anchor.yaml FAKE_NATIVE_SCENARIO=failure /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   if next_repository; then exit 1; else [[ "$?" == 2 ]] || exit 1; fi
 ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 
@@ -455,6 +535,8 @@ for frontend_workflow in release.yaml deploy.yaml; do
       env TRIPS_LINUX_LIMA_SLOT="$frontend_slot" FAKE_FRONTEND_DEPLOY_WORKFLOW="$frontend_workflow" \
         FAKE_DEPLOY_SCENARIO="$frontend_scenario" /bin/zsh -c '
           source "$1"
+          installation_token_value=test-token
+          installation_token_expires_at=4102444800
           next_repository || exit 1
           [[ "$selected_repository" == jai/trips-frontend && "$selected_runner_lane" == deploy ]] || {
             print -u2 -- "Frontend publication must outrank queued CI"
@@ -467,12 +549,16 @@ for frontend_workflow in release.yaml deploy.yaml; do
 done
 env FAKE_FRONTEND_DEPLOY_WORKFLOW=release.yaml FAKE_DEPLOY_SCENARIO=fork /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   next_repository || exit 1
   [[ "$selected_runner_lane" == delivery ]] || exit 1
   release_selection_lock
 ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 env FAKE_FRONTEND_DEPLOY_WORKFLOW=release.yaml FAKE_DEPLOY_SCENARIO=failure /bin/zsh -c '
   source "$1"
+  installation_token_value=test-token
+  installation_token_expires_at=4102444800
   if next_repository; then exit 1; else [[ "$?" == 2 ]] || exit 1; fi
 ' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 
@@ -483,6 +569,8 @@ for api_workflow in release.yaml deploy.yaml; do
       env TRIPS_LINUX_LIMA_SLOT="$api_slot" FAKE_API_RELEASE_WORKFLOW="$api_workflow" \
         FAKE_API_RELEASE_SCENARIO="$api_scenario" /bin/zsh -c '
           source "$1"
+          installation_token_value=test-token
+          installation_token_expires_at=4102444800
           next_repository || exit 1
           [[ "$selected_repository" == jai/trips-api && "$selected_runner_lane" == deploy ]] || exit 1
           release_selection_lock
@@ -873,6 +961,8 @@ for concurrent_slot in a b; do
     TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend' \
     /bin/zsh -c '
       source "$1"
+      installation_token_value=test-token
+      installation_token_expires_at=4102444800
       repository_oldest_queued_job_timestamp() { [[ "${2:-general}" == general ]] || return 1; print -r -- 2026-08-25T00:00:00Z; }
       next_repository
       print -r -- "slot=${slot} selected=${selected_repository}" >> "$2"
