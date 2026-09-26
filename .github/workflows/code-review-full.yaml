@@ -127,6 +127,7 @@ jobs:
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || '' }}
           ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
           ISSUE_PULL_REQUEST_URL: ${{ github.event.issue.pull_request.url || '' }}
+          GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}
         run: |
           set -euo pipefail
           echo "Event: $EVENT_NAME"
@@ -149,6 +150,18 @@ jobs:
             echo "⚠️ Could not determine PR number for event: $EVENT_NAME"
             echo "::error::Unsupported event type: $EVENT_NAME"
             exit 1
+          fi
+
+          # Automatic triggers honour the agent-ignore label at job start, not only at
+          # event time: a queued review can start hours after the PR was labelled.
+          # An explicit /review comment still runs.
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            labels="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')"
+            if [[ ",${labels}," == *",agent-ignore,"* ]]; then
+              echo "::notice::Skipping automatic review: PR #$PR_NUMBER is labelled agent-ignore"
+              echo "has_pr=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
