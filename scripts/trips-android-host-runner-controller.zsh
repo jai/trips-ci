@@ -74,7 +74,8 @@ emulator_acceleration_healthy() {
 
 queued_android_job_exists() {
   local run_status run_ids run_id queued_labels
-  for run_status in queued in_progress; do
+  # Pending runs (held by a concurrency queue) already carry queued jobs; scan them last.
+  for run_status in queued in_progress pending; do
     run_ids=$("$gh_cli" api --paginate "repos/${repository}/actions/runs?status=${run_status}&per_page=100" --jq '.workflow_runs[].id') || return 1
     while IFS= read -r run_id; do
       [[ -n "$run_id" ]] || continue

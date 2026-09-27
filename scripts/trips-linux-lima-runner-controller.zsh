@@ -202,7 +202,8 @@ repository_oldest_queued_job_timestamp() {
   # Linux job: selection only needs proof of work, and walking every job in
   # every active workflow delayed runner registration by several minutes.
   for workflow in "${workflows[@]}"; do
-    for run_status in queued in_progress; do
+    # Pending runs (held by a concurrency queue) already carry queued jobs; scan them last.
+    for run_status in queued in_progress pending; do
       runs=$(repository_workflow_runs "$repository" "$run_status" "$workflow") || return 2
       while IFS=$'\t' read -r run_id run_created_at head_repository; do
         [[ -n "$run_id" ]] || continue

@@ -34,6 +34,9 @@ elif [[ "$request" == *'/actions/workflows/maestro-ios.yaml/runs?'* || "$request
       [[ "$request" != *'status=in_progress'* ]] || print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend'
       ;;
     queued) print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend' ;;
+    pending)
+      [[ "$request" != *'status=pending'* ]] || print -r -- $'102\t2026-08-25T00:04:00Z\tjai/trips-frontend'
+      ;;
   esac
   fi
 elif [[ "$request" == *'/actions/workflows/'* && ( "$request" == *'/deploy.yaml/runs?'* || "$request" == *'/release.yaml/runs?'* ) ]]; then
@@ -217,7 +220,7 @@ export FAKE_SCENARIO=mixed
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 native)"
 export FAKE_SCENARIO=standard
 assert_equal '' "$(workflow_run_oldest_queued_job_timestamp jai/trips-frontend 101 native)"
-for native_scenario in queued in_progress; do
+for native_scenario in queued in_progress pending; do
   export FAKE_NATIVE_SCENARIO="$native_scenario"
   next_repository
   assert_equal jai/trips-frontend "$selected_repository"
