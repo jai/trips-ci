@@ -41,6 +41,15 @@ case "${FAKE_SCENARIO:-}" in
       print -r -- '[{"jobs":[]}]'
     fi
     ;;
+  pending-only)
+    if [[ "$request" == *'repos/jai/trips-frontend/actions/runs?status=pending'* ]]; then
+      print -r -- $'404\t2026-08-25T00:00:00Z\tjai/trips-frontend'
+    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs?'* ]]; then
+      :
+    elif [[ "$request" == *'repos/jai/trips-frontend/actions/runs/404/jobs?'* ]]; then
+      print -r -- '[{"jobs":[{"status":"queued","created_at":"2026-08-25T00:00:04Z","labels":["self-hosted","macOS","ARM64","tart","ios"]}]}]'
+    fi
+    ;;
   *)
     print -u2 -- "Unknown fake scenario"
     exit 1
@@ -213,6 +222,8 @@ if workflow_run_oldest_queued_job_timestamp jai/trips-frontend 202 | /usr/bin/gr
   print -u2 -- 'Expected no matching queued job'
   exit 1
 fi
+export FAKE_SCENARIO=pending-only
+assert_equal 2026-08-25T00:00:04Z "$(repository_oldest_queued_job_timestamp jai/trips-frontend)"
 
 typeset production_repository_oldest_queued_job_timestamp="${functions[repository_oldest_queued_job_timestamp]}"
 typeset -g frontend_queued_at=2026-08-25T00:03:00Z

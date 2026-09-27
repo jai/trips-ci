@@ -35,6 +35,17 @@ case "${FAKE_GH_SCENARIO:-runner}" in
       exit 64
     fi
     ;;
+  queue-pending)
+    if [[ "$request" == *'actions/runs?status=queued'* || "$request" == *'actions/runs?status=in_progress'* ]]; then
+      :
+    elif [[ "$request" == *'actions/runs?status=pending'* ]]; then
+      print -r -- 789
+    elif [[ "$request" == *'actions/runs/789/jobs?'* ]]; then
+      print -r -- yes
+    else
+      exit 64
+    fi
+    ;;
   queue-in-progress)
     if [[ "$request" == *'actions/runs?status=queued'* ]]; then
       :
@@ -140,6 +151,7 @@ if TRIPS_ANDROID_CONTROLLER_LIBRARY_ONLY=true TRIPS_ANDROID_GH_CLI=/usr/bin/fals
   exit 1
 fi
 FAKE_GH_SCENARIO=queue-match queued_android_job_exists
+FAKE_GH_SCENARIO=queue-pending queued_android_job_exists
 FAKE_GH_SCENARIO=queue-in-progress queued_android_job_exists
 
 runner_worker_claimed() { return 0; }

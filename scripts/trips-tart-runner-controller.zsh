@@ -192,7 +192,9 @@ repository_is_private() {
 
 repository_workflow_runs() {
   local repository="$1" run_status
-  for run_status in queued in_progress; do
+  # GitHub keeps a run in "pending" while a concurrency queue (maestro-ios `queue: max`)
+  # holds it, yet its jobs are already queued, so pending runs must be scanned too.
+  for run_status in queued in_progress pending; do
     "$gh_cli" api \
       -H 'Accept: application/vnd.github+json' \
       -H 'X-GitHub-Api-Version: 2022-11-28' \
