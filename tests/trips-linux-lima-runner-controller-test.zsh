@@ -1212,7 +1212,11 @@ fi
 blocked_signals=$(run_with_timeout 2 /usr/bin/python3 -c \
   'import signal; print(" ".join(sorted(item.name for item in signal.pthread_sigmask(signal.SIG_BLOCK, []))))')
 assert_equal '' "$blocked_signals"
-for signal_spec in HUP:129 INT:130 QUIT:131 TERM:143; do
+# SIGQUIT's default action dumps core, which macOS reports as a Python crash,
+# so check that the wrapped command inherits its default action instead.
+run_with_timeout 2 /usr/bin/python3 -c \
+  'import signal; raise SystemExit(0 if signal.getsignal(signal.SIGQUIT) == signal.SIG_DFL else 1)'
+for signal_spec in HUP:129 INT:130 TERM:143; do
   signal_name="${signal_spec%%:*}"
   expected_status="${signal_spec#*:}"
   if run_with_timeout 2 /usr/bin/python3 -c \
