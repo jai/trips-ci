@@ -9,10 +9,10 @@
 ## Repo Identity
 
 - Shared GitHub Actions workflows for Trips repositories.
-- Typical workflows include `pull-request-validation.yaml` (the canonical PR check covering semantic title, PR-issue linking, and required checks), `code-review*.yaml` (Codex review orchestration), `auto-merge.yaml`, `coverage-octocov.yml`, `issue-flow-gate.yaml`, `pr-image-check.yaml`, and `validate-workflows.yaml`.
+- Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
 - Runner controllers that execute all private Trips CI on Jai's laptop `borg-cube-03`:
   - `scripts/trips-linux-lima-runner-controller.zsh` — two ephemeral Lima Ubuntu ARM64 slots (`a`, `b`), labels `self-hosted, linux, arm64, jai-ci`.
-    API/frontend required PR validators use the exclusive `jai-ci-validation` capability. Both slots select native preparation, deployment, validation, delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
+    Both slots select native preparation, deployment, validation (`jai-ci-validation`; no Trips workflow requests it now), delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
   - `scripts/trips-tart-runner-controller.zsh` — one ephemeral macOS Tart slot for iOS build / TestFlight / Maestro, labels `self-hosted, macOS, ARM64, tart, ios`.
   - `scripts/trips-android-host-runner-controller.zsh` — ephemeral Android host runner, labels `self-hosted, macOS, ARM64, borg-cube-03, android`; shares the native lane lock with iOS.
   - `launchd/*.plist` keep the controllers running headlessly; `scripts/provision-*-runner-base.zsh` build the base images.
@@ -32,14 +32,15 @@
 - Keep security boundaries around tokens, permissions, and comment/review automation.
 - Prefer least-privilege GitHub Actions permissions.
 - Runners are always registered `--ephemeral` and destroyed after one job; do not introduce persistent runners, GitHub-hosted macOS, or host-name labels in downstream workflows.
-- Use GitHub Issues/PRs only (no Linear).
+- Track work in GitHub Issues (no Linear).
 
 ## Workflow Defaults
 
+- Push to `main`; do not open pull requests. Factory stages are the exception: they follow their stage prompt, which opens and merges a PR. Before each push, run `codex review --base origin/main` and fix what it finds; `validate-workflows.yaml` runs on the push.
 - Prefer small workflow changes with clear validation.
 - Avoid compatibility indirection unless explicitly requested.
 - Ship quickly, but keep critical gating checks reliable.
-- After merging controller changes, redeploy the exact scripts/plists to `borg-cube-03` (wrappers in `~/.local/bin/`) and record the result in working memory.
+- After pushing controller changes, redeploy the exact scripts/plists to `borg-cube-03` (wrappers in `~/.local/bin/`) and record the result in working memory.
 
 ## End-to-End Evidence Standard
 
@@ -59,11 +60,11 @@ trips-ci/
 └── tests/               # controller and workflow tests
 ```
 
-- `templates/` holds caller-workflow templates copied or rendered into each downstream repo's `.github/workflows/`. Today `scripts/generate-caller-workflows.sh` only renders `templates/code-review-caller.yaml` -> `code-review.yaml`; other templates here (e.g. `issue-flow-gate-caller.yaml`) are propagated manually or via other automation.
+- `templates/code-review-caller.yaml` is the caller workflow for repos that use the shared Codex PR review; `scripts/generate-caller-workflows.sh` renders it into the target repos you name.
 
 ## Commands
 
-- `scripts/generate-caller-workflows.sh [--check|--stdout] [target-dir...]` regenerates caller workflows in downstream repos. With no arguments it uses the hardcoded `DEFAULT_TARGETS` (umbrella subrepo paths under `/Users/jai/Developer/trips/`).
+- `scripts/generate-caller-workflows.sh [--check|--stdout] <target-dir>...` renders `code-review.yaml` into the named downstream repos. Trips repos do not call it.
 - `scripts/validate-workflows.sh` validates the rendered output.
 - Laptop health check: `launchctl list | grep com.jai.trips`, `tart list`, `limactl list`, and the controller logs under `~/Library/Logs/trips-*-runner/`.
 

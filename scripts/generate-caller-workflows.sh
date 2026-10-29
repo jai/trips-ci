@@ -5,15 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE="$REPO_ROOT/templates/code-review-caller.yaml"
 
-DEFAULT_TARGETS=(
-  "/Users/jai/Developer/trips"
-  "/Users/jai/Developer/trips/api"
-  "/Users/jai/Developer/trips/frontend"
-  "/Users/jai/Developer/trips/worker"
-  "/Users/jai/Developer/trips/infra"
-  "/Users/jai/Developer/trips-fastlane"
-)
-
 mode="write"
 case "${1:-}" in
   --check)
@@ -26,11 +17,11 @@ case "${1:-}" in
     ;;
 esac
 
-if [[ "$#" -gt 0 ]]; then
-  TARGETS=("$@")
-else
-  TARGETS=("${DEFAULT_TARGETS[@]}")
+if [[ "$#" -eq 0 ]]; then
+  echo "usage: $0 [--check|--stdout] <target-repo-dir>..." >&2
+  exit 2
 fi
+TARGETS=("$@")
 
 is_jai_only_target() {
   local target_name
