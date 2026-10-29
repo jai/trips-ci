@@ -54,6 +54,7 @@ typeset -g selected_repository=""
 typeset -g native_lane_lock_owned=false
 typeset -g native_lane_release_failed=false
 typeset -g native_capacity_reason=""
+typeset -g capacity_wait=false
 
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 
@@ -475,6 +476,19 @@ host_capacity_available() {
   (( ${#reasons} == 0 ))
 }
 
+# After a deferral, wait here instead of rescanning GitHub, which costs Jai's
+# token quota on every pass. Take the budget claim as soon as it is free so
+# Linux slots cannot fill the budget while the iOS VM waits.
+capacity_ready() {
+  local vm_cpus="$1" vm_memory_gib="$2"
+  local -a allocation
+  acquire_lock "$budget_lock" "$budget_controllers" || return 1
+  host_capacity_available "$vm_memory_gib" || return 1
+  ci_vm_allocation || return 1
+  allocation=(${=REPLY})
+  (( allocation[1] + vm_cpus <= budget_cpus && allocation[2] + vm_memory_gib * 1024 <= budget_memory_gib * 1024 ))
+}
+
 # CI shares Jai's working laptop. Start the VM only while the host is not busy
 # and every CI job VM, this one included, fits the fixed budget. iOS work has
 # priority, so a deferred reservation keeps the budget lock: Linux slots cannot
@@ -665,11 +679,14 @@ run_one_ephemeral_runner() {
     lane_status=$?
     (( lane_status == 2 )) && return 1
     native_capacity_reason="$REPLY"
+    # Another native VM, not the budget, blocks this job; do not hold Linux back.
+    release_lock "$budget_lock"
     return "$native_capacity_deferred_status"
   fi
 
   if ! reserve_vm_capacity "$base_cpus" "$((base_memory_mb / 1024))"; then
     native_capacity_reason="$REPLY"
+    capacity_wait=true
     release_native_lane
     return "$native_capacity_deferred_status"
   fi
@@ -822,6 +839,13 @@ main() {
   done
 
   while true; do
+    if [[ "$capacity_wait" == true ]]; then
+      if ! capacity_ready "$base_cpus" "$((base_memory_mb / 1024))"; then
+        /bin/sleep "$idle_scan_interval_seconds"
+        continue
+      fi
+      capacity_wait=false
+    fi
     if next_repository; then
       repository="$selected_repository"
       run_one_ephemeral_runner "$repository"

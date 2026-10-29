@@ -935,6 +935,27 @@ assert_equal unlocked "$claim_resolution_lock_state"
     exit 1
   }
 )
+# A deferred slot rechecks capacity locally, without scanning GitHub.
+capacity_ready 3 8
+if FAKE_CPU_IDLE=10 capacity_ready 3 8; then
+  print -u2 -- 'Expected a busy host to keep the deferred slot waiting'
+  exit 1
+fi
+if FAKE_LIMA_JOB_VMS=1 FAKE_TART_JOB_VM=trips-runner-job-ios capacity_ready 3 8; then
+  print -u2 -- 'Expected a full budget to keep the deferred slot waiting'
+  exit 1
+fi
+/bin/zsh -c 'sleep 30; :' trips-tart-runner-controller &
+ios_claim_pid=$!
+print -r -- "$ios_claim_pid" > "$TRIPS_CI_BUDGET_LOCK"
+if capacity_ready 3 8; then
+  print -u2 -- 'Expected a waiting iOS claim to keep the deferred slot waiting'
+  exit 1
+fi
+/bin/kill "$ios_claim_pid"
+wait "$ios_claim_pid" 2>/dev/null || true
+/bin/rm -f "$TRIPS_CI_BUDGET_LOCK"
+
 validate_lane_sizes
 if TRIPS_CI_BUDGET_CPUS=2 /bin/zsh -c 'source "$1"; validate_lane_sizes' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"; then
   print -u2 -- 'Expected a lane VM larger than the budget to fail startup validation'

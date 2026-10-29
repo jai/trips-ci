@@ -835,6 +835,20 @@ host_capacity_available() {
   (( ${#reasons} == 0 ))
 }
 
+# After a deferral, wait here instead of rescanning GitHub: each queue scan
+# costs about 30 calls of Jai's 5,000-per-hour token quota. Rescan once the
+# host and budget could take the VM; reserve_vm_capacity decides at clone time.
+capacity_ready() {
+  local vm_cpus="$1" vm_memory_gib="$2"
+  local -a allocation
+  host_capacity_available "$vm_memory_gib" || return 1
+  read_lock_owner "$budget_lock"
+  lock_owner_is_controller "$REPLY" "$budget_controllers" && return 1
+  ci_vm_allocation || return 1
+  allocation=(${=REPLY})
+  (( allocation[1] + vm_cpus <= budget_cpus && allocation[2] + vm_memory_gib * 1024 <= budget_memory_gib * 1024 ))
+}
+
 # CI shares Jai's working laptop. Start a VM only while the host is not busy
 # and every CI job VM, this one included, fits the fixed budget. On success
 # the caller holds the budget lock until its VM exists in the inventory.
@@ -990,12 +1004,20 @@ main() {
   done <<< "$stale_vms"
 
   while true; do
+    if [[ -n "$capacity_deferral" ]]; then
+      lane_vm_size "$selected_runner_lane" "$repository"
+      if ! capacity_ready ${=REPLY}; then
+        selection_sleep "$capacity_backoff_seconds"
+        continue
+      fi
+      capacity_deferral=""
+    fi
     if next_repository; then
       repository="$selected_repository"
       if run_one_ephemeral_runner "$repository" "$selected_runner_lane"; then
         log "ephemeral runner completed a job for ${repository}"
       elif [[ -n "$capacity_deferral" ]]; then
-        log "deferring ${repository} ${selected_runner_lane} work: ${capacity_deferral}; retrying in ${capacity_backoff_seconds} seconds"
+        log "deferring ${repository} ${selected_runner_lane} work: ${capacity_deferral}; rechecking every ${capacity_backoff_seconds} seconds"
         selection_sleep "$capacity_backoff_seconds"
       else
         log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"

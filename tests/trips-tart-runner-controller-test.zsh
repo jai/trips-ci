@@ -646,6 +646,31 @@ assert_equal 'host busy: CPU 10% idle, need 40%' "$REPLY"
 release_lock "$TRIPS_CI_BUDGET_LOCK"
 [[ ! -e "$TRIPS_CI_BUDGET_LOCK" ]]
 
+# While deferred, the iOS VM waits locally with the budget claim until it fits.
+if FAKE_LIMA_JOB_VMS=2 capacity_ready 4 16; then
+  print -u2 -- 'Expected two Linux VMs to keep the iOS VM waiting'
+  exit 1
+fi
+assert_equal $$ "$(cat "$TRIPS_CI_BUDGET_LOCK")"
+if FAKE_CPU_IDLE=10 FAKE_LIMA_JOB_VMS=1 capacity_ready 4 16; then
+  print -u2 -- 'Expected a busy host to keep the iOS VM waiting'
+  exit 1
+fi
+FAKE_LIMA_JOB_VMS=1 capacity_ready 4 16
+release_lock "$TRIPS_CI_BUDGET_LOCK"
+# A Linux slot holds the lock while it clones; the iOS VM waits for it.
+/bin/zsh -c 'sleep 30; :' trips-linux-lima-runner-controller &
+lima_clone_pid=$!
+print -r -- "$lima_clone_pid" > "$TRIPS_CI_BUDGET_LOCK"
+if capacity_ready 4 16; then
+  print -u2 -- 'Expected a Linux clone in progress to keep the iOS VM waiting'
+  exit 1
+fi
+assert_equal "$lima_clone_pid" "$(cat "$TRIPS_CI_BUDGET_LOCK")"
+kill "$lima_clone_pid" 2>/dev/null || true
+wait "$lima_clone_pid" 2>/dev/null || true
+/bin/rm -f "$TRIPS_CI_BUDGET_LOCK"
+
 : > "$FAKE_TART_RUN_LOG"
 export FAKE_VM_INVENTORY_ERROR=true
 if acquire_clean_native_lane; then
