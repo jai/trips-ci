@@ -98,10 +98,50 @@ elif [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
   print -r -- 'test-vm'
 elif [[ "$1" == list && "${FAKE_STALE_VM_PRESENT:-false}" == true ]]; then
   print -r -- 'trips-runner-job-stale'
+elif [[ "$1" == list && -n "${FAKE_TART_JOB_VM:-}" ]]; then
+  print -r -- "$FAKE_TART_JOB_VM"
+elif [[ "$1" == get ]]; then
+  print -r -- '{"CPU":4,"Memory":16384,"State":"running"}'
 fi
 exit 0
 SCRIPT
 chmod 700 "$fake_tart"
+
+fake_lima="${test_directory}/limactl"
+cat > "$fake_lima" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+[[ "$1" == list ]] || exit 64
+for (( vm = 1; vm <= ${FAKE_LIMA_JOB_VMS:-0}; vm++ )); do
+  print -r -- '{"name":"trips-linux-runner-a-job-'"$vm"'","status":"Running","cpus":3,"memory":8589934592}'
+done
+print -r -- '{"name":"trips-linux-runner-base","status":"Stopped","cpus":3,"memory":8589934592}'
+SCRIPT
+chmod 700 "$fake_lima"
+
+fake_iostat="${test_directory}/iostat"
+cat > "$fake_iostat" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+print -r -- '      cpu    load average'
+print -r -- ' us sy id   1m   5m   15m'
+print -r -- ' 20 10 70  30.00 30.00 30.00'
+print -r -- " 5 5 ${FAKE_CPU_IDLE:-90}  ${FAKE_LOAD_AVERAGE:-12.50} 20.00 20.00"
+SCRIPT
+chmod 700 "$fake_iostat"
+
+fake_sysctl="${test_directory}/sysctl"
+cat > "$fake_sysctl" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+case "$2" in
+  kern.memorystatus_vm_pressure_level) print -r -- "${FAKE_MEMORY_PRESSURE:-1}" ;;
+  kern.memorystatus_level) print -r -- "${FAKE_MEMORY_AVAILABLE_PERCENT:-80}" ;;
+  hw.memsize) print -r -- 68719476736 ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod 700 "$fake_sysctl"
 
 fake_shlock="${test_directory}/shlock"
 cat > "$fake_shlock" <<'SCRIPT'
@@ -127,6 +167,10 @@ export TRIPS_TART_GH_CLI="$fake_gh"
 export TRIPS_TART_CURL_CLI="$fake_curl"
 export TRIPS_TART_CLI="$fake_tart"
 export TRIPS_TART_SHLOCK_CLI="$fake_shlock"
+export TRIPS_TART_LIMA_CLI="$fake_lima"
+export TRIPS_TART_IOSTAT_CLI="$fake_iostat"
+export TRIPS_TART_SYSCTL_CLI="$fake_sysctl"
+export TRIPS_CI_BUDGET_LOCK="${test_directory}/ci-vm-budget.lock"
 export TRIPS_TART_REPOSITORIES='jai/trips-frontend,jai/tonegate'
 export TRIPS_TART_CLAIM_TIMEOUT_SECONDS=2
 export TRIPS_TART_CLAIM_POLL_SECONDS=0.1
@@ -479,15 +523,128 @@ else
 fi
 export FAKE_VM_INVENTORY_ERROR=false
 
-acquire_controller_lock
-if TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
+# A live controller keeps its lock. The stand-in's command line names the
+# controller script; this test process's does not.
+holder_ready="${test_directory}/holder-ready"
+holder_release="${test_directory}/holder-release"
+TRIPS_RUNNER_CONTROLLER_LIBRARY_ONLY=true \
   TRIPS_TART_CONTROLLER_LOCK="$TRIPS_TART_CONTROLLER_LOCK" \
-  zsh -uc 'source "$1"; acquire_controller_lock' \
-  _ "${repo_root}/scripts/trips-tart-runner-controller.zsh"; then
+  zsh -uc 'source "$1"; acquire_controller_lock || exit 1; : > "$2"; while [[ ! -e "$3" ]]; do sleep 0.02; done; release_controller_lock' \
+  _ "${repo_root}/scripts/trips-tart-runner-controller.zsh" "$holder_ready" "$holder_release" &
+holder_pid=$!
+for _ in {1..100}; do
+  [[ -e "$holder_ready" ]] && break
+  sleep 0.02
+done
+[[ -e "$holder_ready" ]] || {
+  print -u2 -- 'Controller stand-in did not acquire the singleton lock'
+  exit 1
+}
+if acquire_controller_lock; then
   print -u2 -- 'Expected the controller singleton lock to reject a live contender'
   exit 1
 fi
+: > "$holder_release"
+wait "$holder_pid"
+[[ ! -e "$TRIPS_TART_CONTROLLER_LOCK" ]]
+
+# A recycled PID that now runs something else (on 2026-10-29, a Batteries
+# widget) or a dead PID must not block startup.
+/bin/sleep 30 &
+recycled_pid=$!
+for stale_owner in "$recycled_pid" 999999; do
+  print -r -- "$stale_owner" > "$TRIPS_TART_CONTROLLER_LOCK"
+  acquire_controller_lock
+  assert_equal $$ "$(cat "$TRIPS_TART_CONTROLLER_LOCK")"
+  [[ ! -e "${TRIPS_TART_CONTROLLER_LOCK}.takeover" ]]
+  release_controller_lock
+done
+# A lock that already names this PID is ours.
+print -r -- $$ > "$TRIPS_TART_CONTROLLER_LOCK"
+acquire_controller_lock
 release_controller_lock
+[[ ! -e "$TRIPS_TART_CONTROLLER_LOCK" ]]
+# A takeover guard left by a recycled PID is cleared, then the retry succeeds.
+print -r -- "$recycled_pid" > "$TRIPS_TART_CONTROLLER_LOCK"
+print -r -- "$recycled_pid" > "${TRIPS_TART_CONTROLLER_LOCK}.takeover"
+if acquire_controller_lock; then
+  print -u2 -- 'Expected a recycled takeover guard to defer this attempt'
+  exit 1
+fi
+[[ ! -e "${TRIPS_TART_CONTROLLER_LOCK}.takeover" ]]
+acquire_controller_lock
+release_controller_lock
+
+# The native lane is shared with the Android controller: its live lock holds,
+# while a recycled PID in the same lock is taken over.
+/bin/zsh -c 'sleep 30; :' trips-android-host-runner-controller &
+android_stand_in_pid=$!
+print -r -- "$android_stand_in_pid" > "$TRIPS_TART_NATIVE_LANE_LOCK"
+if acquire_clean_native_lane; then
+  print -u2 -- 'Expected a live Android controller to keep the native lane'
+  exit 1
+else
+  assert_equal 3 "$?"
+fi
+print -r -- "$recycled_pid" > "$TRIPS_TART_NATIVE_LANE_LOCK"
+acquire_clean_native_lane
+assert_equal $$ "$(cat "$TRIPS_TART_NATIVE_LANE_LOCK")"
+release_native_lane
+[[ ! -e "$TRIPS_TART_NATIVE_LANE_LOCK" ]]
+kill "$recycled_pid" "$android_stand_in_pid" 2>/dev/null || true
+wait "$recycled_pid" "$android_stand_in_pid" 2>/dev/null || true
+
+# Host gate: CPU idle and memory pressure decide, not the inflated load average.
+host_capacity_available 16
+assert_equal '' "$REPLY"
+if FAKE_CPU_IDLE=39 host_capacity_available 16; then
+  print -u2 -- 'Expected low CPU idle to defer VM start'
+  exit 1
+fi
+assert_equal 'CPU 39% idle, need 40%' "$REPLY"
+FAKE_LOAD_AVERAGE=183.84 host_capacity_available 16
+if FAKE_LOAD_AVERAGE=400.25 host_capacity_available 16; then
+  print -u2 -- 'Expected a runaway load average to defer VM start'
+  exit 1
+fi
+assert_equal 'load average 400.25, limit 400' "$REPLY"
+if FAKE_MEMORY_PRESSURE=2 host_capacity_available 16; then
+  print -u2 -- 'Expected kernel memory pressure to defer VM start'
+  exit 1
+fi
+assert_equal 'memory pressure level 2' "$REPLY"
+FAKE_MEMORY_AVAILABLE_PERCENT=50 host_capacity_available 16
+if FAKE_MEMORY_AVAILABLE_PERCENT=49 host_capacity_available 16; then
+  print -u2 -- 'Expected the host memory reserve to defer VM start'
+  exit 1
+fi
+assert_equal '31 GiB available, need 16 GiB plus 16 GiB reserve' "$REPLY"
+if TRIPS_TART_IOSTAT_CLI=/usr/bin/false zsh -uc 'source "$1"; host_capacity_available 16' _ "${repo_root}/scripts/trips-tart-runner-controller.zsh"; then
+  print -u2 -- 'Expected a failed CPU sample to fail the host gate closed'
+  exit 1
+fi
+
+# Budget: every CI job VM counts. The iOS VM fits beside one Linux VM, not two.
+FAKE_LIMA_JOB_VMS=1 FAKE_TART_JOB_VM=trips-runner-job-other ci_vm_allocation
+assert_equal '7 24576' "$REPLY"
+FAKE_LIMA_JOB_VMS=1 reserve_vm_capacity 4 16
+assert_equal $$ "$(cat "$TRIPS_CI_BUDGET_LOCK")"
+release_lock "$TRIPS_CI_BUDGET_LOCK"
+if FAKE_LIMA_JOB_VMS=2 reserve_vm_capacity 4 16; then
+  print -u2 -- 'Expected two Linux VMs to leave no budget for the iOS VM'
+  exit 1
+fi
+assert_equal 'CI budget 7 vCPU / 24 GiB has 6 vCPU / 16 GiB in use; this VM needs 4 vCPU / 16 GiB' "$REPLY"
+# A deferred iOS reservation keeps the budget lock so Linux slots cannot
+# start new VMs ahead of it.
+assert_equal $$ "$(cat "$TRIPS_CI_BUDGET_LOCK")"
+if FAKE_CPU_IDLE=10 reserve_vm_capacity 4 16; then
+  print -u2 -- 'Expected a busy host to defer the iOS VM'
+  exit 1
+fi
+assert_equal 'host busy: CPU 10% idle, need 40%' "$REPLY"
+release_lock "$TRIPS_CI_BUDGET_LOCK"
+[[ ! -e "$TRIPS_CI_BUDGET_LOCK" ]]
 
 : > "$FAKE_TART_RUN_LOG"
 export FAKE_VM_INVENTORY_ERROR=true

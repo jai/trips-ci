@@ -26,7 +26,44 @@ typeset -g active_runner_name=""
 typeset -g active_job_root=""
 
 log() { print -r -- "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*"; }
-acquire_lock() { "$shlock_cli" -f "$1" -p $$; }
+
+# shlock trusts any live PID, and PIDs recycle across reboots. An owner counts
+# only while its command line runs a controller; see the Tart controller.
+lock_owner_is_controller() {
+  local owner_pid="$1" controllers="$2" command_line
+  [[ "$owner_pid" == <1-> && "$owner_pid" != $$ ]] || return 1
+  command_line=$(/bin/ps -ww -o command= -p "$owner_pid" 2>/dev/null) || return 1
+  [[ " ${command_line} " == *[/\ ]${~controllers}(|.zsh)\ * ]]
+}
+
+read_lock_owner() {
+  REPLY=""
+  [[ -r "$1" ]] && read -r REPLY <"$1"
+  return 0
+}
+
+acquire_lock() {
+  local lock_path="$1" controllers="$2" guard="${1}.takeover" takeover_status=1
+  "$shlock_cli" -f "$lock_path" -p $$ && return 0
+  read_lock_owner "$lock_path"
+  # A lock that already names this PID is ours, even if an earlier process
+  # with the same recycled PID wrote it.
+  [[ "$REPLY" == $$ ]] && return 0
+  lock_owner_is_controller "$REPLY" "$controllers" && return 1
+  if ! "$shlock_cli" -f "$guard" -p $$; then
+    read_lock_owner "$guard"
+    lock_owner_is_controller "$REPLY" "$controllers" || /bin/rm -f "$guard"
+    return 1
+  fi
+  read_lock_owner "$lock_path"
+  if ! lock_owner_is_controller "$REPLY" "$controllers"; then
+    log "taking over ${lock_path} from PID ${REPLY:-none}, which is not a runner controller"
+    /bin/rm -f "$lock_path"
+    "$shlock_cli" -f "$lock_path" -p $$ && takeover_status=0
+  fi
+  /bin/rm -f "$guard"
+  return "$takeover_status"
+}
 release_lock() {
   local path="$1" owner=""
   [[ -r "$path" ]] && read -r owner <"$path"
@@ -209,13 +246,13 @@ cleanup_and_release() {
 
 main() {
   mkdir -p "${controller_lock:h}"
-  acquire_lock "$controller_lock" || return 1
+  acquire_lock "$controller_lock" trips-android-host-runner-controller || return 1
   trap 'cleanup_and_release' EXIT
   trap 'exit 143' INT TERM
   "$gh_cli" auth status >/dev/null 2>&1 || return 1
   while true; do
     queued_android_job_exists || { sleep 30; continue; }
-    acquire_lock "$lock_path" || { sleep 15; continue; }
+    acquire_lock "$lock_path" 'trips-(tart-runner|android-host-runner)-controller' || { sleep 15; continue; }
     native_lock_owned=true
     if ! android_preflight; then
       log 'Android host preflight failed; refusing runner registration'

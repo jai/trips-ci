@@ -9,8 +9,7 @@ readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-
 readonly -a repository_list=(${(s:,:)repositories})
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
 readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
-readonly cpus="${TRIPS_LINUX_LIMA_CPUS:-3}"
-readonly memory_gib="${TRIPS_LINUX_LIMA_MEMORY_GIB:-8}"
+readonly -a lanes=(general native deploy validation delivery)
 readonly runner_root="/opt/actions-runner"
 readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
 readonly general_runner_labels="jai-ci,jai-ci-tonegate"
@@ -22,6 +21,20 @@ readonly selection_lock_prefix="${LIMA_HOME:-/Users/jai/.lima}/.trips-linux-runn
 readonly gh_cli="${TRIPS_LINUX_LIMA_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_LINUX_LIMA_CURL_CLI:-/usr/bin/curl}"
 readonly lima_cli="${TRIPS_LINUX_LIMA_CLI:-/opt/homebrew/bin/limactl}"
+readonly tart_cli="${TRIPS_LINUX_LIMA_TART_CLI:-/opt/homebrew/bin/tart}"
+readonly shlock_cli="${TRIPS_LINUX_LIMA_SHLOCK_CLI:-/usr/bin/shlock}"
+readonly iostat_cli="${TRIPS_LINUX_LIMA_IOSTAT_CLI:-/usr/sbin/iostat}"
+readonly sysctl_cli="${TRIPS_LINUX_LIMA_SYSCTL_CLI:-/usr/sbin/sysctl}"
+# Host-wide CI policy, shared with the Tart controller; keep both copies equal.
+readonly budget_lock="${TRIPS_CI_BUDGET_LOCK:-/Users/jai/Library/Logs/trips-ci-vm-budget.lock}"
+readonly budget_controllers='trips-(linux-lima-runner|tart-runner)-controller'
+readonly budget_cpus="${TRIPS_CI_BUDGET_CPUS:-7}"
+readonly budget_memory_gib="${TRIPS_CI_BUDGET_MEMORY_GIB:-24}"
+readonly host_min_cpu_idle_percent="${TRIPS_CI_HOST_MIN_CPU_IDLE_PERCENT:-40}"
+readonly host_max_load_average="${TRIPS_CI_HOST_MAX_LOAD_AVERAGE:-400}"
+readonly host_memory_reserve_gib="${TRIPS_CI_HOST_MEMORY_RESERVE_GIB:-16}"
+readonly host_cpu_sample_seconds="${TRIPS_CI_HOST_CPU_SAMPLE_SECONDS:-5}"
+readonly capacity_backoff_seconds="${TRIPS_CI_CAPACITY_BACKOFF_SECONDS:-60}"
 readonly timeout_python="${TRIPS_LINUX_LIMA_TIMEOUT_PYTHON:-/usr/bin/python3}"
 readonly timeout_preexec_delay_seconds="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_DELAY_SECONDS:-0}"
 readonly timeout_preexec_ready_file="${TRIPS_LINUX_LIMA_TIMEOUT_PREEXEC_READY_FILE:-}"
@@ -43,6 +56,7 @@ typeset -g selected_repository=""
 typeset -g selected_runner_lane=general
 typeset -g selected_repository_lock=""
 typeset -g active_timeout_pid=""
+typeset -g capacity_deferral=""
 typeset -gi repository_scan_start_index=1
 [[ "$slot" == b ]] && repository_scan_start_index=2
 
@@ -54,6 +68,52 @@ timestamp() {
 
 log() {
   print -r -- "$(timestamp) slot=${slot} $*"
+}
+
+# A live PID alone proves nothing: PIDs recycle across reboots, and on
+# 2026-10-29 a Batteries widget held the Tart controller's old PID for eight
+# days. An owner counts only while its command line runs a controller.
+lock_owner_is_controller() {
+  local owner_pid="$1" controllers="${2:-trips-linux-lima-runner-controller}" command_line
+  [[ "$owner_pid" == <1-> && "$owner_pid" != $$ ]] || return 1
+  command_line=$(/bin/ps -ww -o command= -p "$owner_pid" 2>/dev/null) || return 1
+  [[ " ${command_line} " == *[/\ ]${~controllers}(|.zsh)\ * ]]
+}
+
+read_lock_owner() {
+  REPLY=""
+  [[ -r "$1" ]] && read -r REPLY <"$1"
+  return 0
+}
+
+acquire_lock() {
+  local lock_path="$1" controllers="$2" guard="${1}.takeover" takeover_status=1
+  "$shlock_cli" -f "$lock_path" -p $$ && return 0
+  read_lock_owner "$lock_path"
+  # A lock that already names this PID is ours, even if an earlier process
+  # with the same recycled PID wrote it.
+  [[ "$REPLY" == $$ ]] && return 0
+  lock_owner_is_controller "$REPLY" "$controllers" && return 1
+  # Serialize the takeover so two contenders cannot both delete and recreate
+  # the lock. A guard left by a dead or recycled PID is cleared for the retry.
+  if ! "$shlock_cli" -f "$guard" -p $$; then
+    read_lock_owner "$guard"
+    lock_owner_is_controller "$REPLY" "$controllers" || /bin/rm -f "$guard"
+    return 1
+  fi
+  read_lock_owner "$lock_path"
+  if ! lock_owner_is_controller "$REPLY" "$controllers"; then
+    log "taking over ${lock_path} from PID ${REPLY:-none}, which is not a runner controller"
+    /bin/rm -f "$lock_path"
+    "$shlock_cli" -f "$lock_path" -p $$ && takeover_status=0
+  fi
+  /bin/rm -f "$guard"
+  return "$takeover_status"
+}
+
+release_lock() {
+  read_lock_owner "$1"
+  [[ "$REPLY" != $$ ]] || /bin/rm -f "$1"
 }
 
 base64url() {
@@ -360,7 +420,7 @@ acquire_selection_lock() {
   lock_path="$REPLY"
   if ! /bin/mkdir "$lock_path" 2>/dev/null; then
     owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
-    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+    if lock_owner_is_controller "$owner"; then
       return 1
     elif [[ "$owner" != <1-> ]]; then
       modified_at=$("$timeout_python" -c \
@@ -377,7 +437,7 @@ acquire_selection_lock() {
     reclaim_lock_path="${lock_path}.reclaim"
     if ! /bin/mkdir "$reclaim_lock_path" 2>/dev/null; then
       owner="$(/bin/cat "${reclaim_lock_path}/pid" 2>/dev/null || true)"
-      if [[ "$owner" == <1-> ]] && ! /bin/kill -0 "$owner" 2>/dev/null; then
+      if [[ "$owner" == <1-> ]] && ! lock_owner_is_controller "$owner"; then
         /bin/rm -rf "$reclaim_lock_path"
       elif [[ "$owner" != <1-> ]]; then
         modified_at=$("$timeout_python" -c \
@@ -398,7 +458,7 @@ acquire_selection_lock() {
     # Re-check after winning the recovery guard: another process may have
     # replaced the stale reservation before this process acquired the guard.
     owner="$(/bin/cat "${lock_path}/pid" 2>/dev/null || true)"
-    if [[ "$owner" == <1-> ]] && /bin/kill -0 "$owner" 2>/dev/null; then
+    if lock_owner_is_controller "$owner"; then
       /bin/rm -rf "$reclaim_lock_path"
       return 1
     fi
@@ -708,8 +768,102 @@ wait_for_guest_package_manager() {
   done
 }
 
+# Guest size per lane, in vCPUs and GiB. The controller learns only the lane
+# and repository before boot, so each size must fit the lane's heaviest job.
+lane_vm_size() {
+  REPLY="3 8"
+}
+
+# Sum the vCPUs and MiB assigned to every CI job VM, running or not, so a VM
+# that is still being cloned counts against the budget.
+ci_vm_allocation() {
+  setopt local_options pipe_fail
+  local lima_inventory tart_inventory tart_vm tart_vm_config
+  local -a allocation
+  lima_inventory=$("$lima_cli" list --json 2>/dev/null) || return 1
+  allocation=($(printf '%s\n' "$lima_inventory" | /usr/bin/python3 -c 'import json,sys
+cpus=memory=0
+for line in sys.stdin:
+    if line.strip():
+        vm=json.loads(line)
+        if vm["name"].startswith("trips-linux-runner-") and "-job-" in vm["name"]:
+            cpus+=int(vm.get("cpus") or 0); memory+=int(vm.get("memory") or 0)//1048576
+print(cpus, memory)')) || return 1
+  tart_inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || return 1
+  for tart_vm in ${(f)tart_inventory}; do
+    [[ "$tart_vm" == trips-runner-job-* ]] || continue
+    tart_vm_config=$("$tart_cli" get "$tart_vm" --format json 2>/dev/null) || return 1
+    allocation=($(printf '%s' "$tart_vm_config" | /usr/bin/python3 -c 'import json,sys
+vm=json.load(sys.stdin)
+print(int(sys.argv[1])+int(vm["CPU"]), int(sys.argv[2])+int(vm["Memory"]))' "${allocation[@]}")) || return 1
+  done
+  REPLY="${allocation[*]}"
+}
+
+# The laptop's load average overstates real load: darwinbg simulator threads
+# queue for its two efficiency cores (184 at 31% CPU idle on 2026-10-30), so
+# it only catches thread storms (1,007 on 2026-10-29). Measured CPU idle and
+# the kernel's memory pressure decide.
+host_capacity_available() {
+  local vm_memory_gib="$1" sample pressure available_percent memory_bytes
+  local -a fields reasons
+  local -i available_gib
+  sample=$("$iostat_cli" -n 0 -c 2 -w "$host_cpu_sample_seconds" 2>/dev/null | /usr/bin/tail -n 1)
+  fields=(${=sample})
+  # iostat columns: us sy id 1m 5m 15m; the last row covers the sample interval.
+  if (( ${#fields} != 6 )) || [[ "${fields[3]}" != <-> ]]; then
+    REPLY="unable to sample host CPU"
+    return 1
+  fi
+  pressure=$("$sysctl_cli" -n kern.memorystatus_vm_pressure_level 2>/dev/null)
+  available_percent=$("$sysctl_cli" -n kern.memorystatus_level 2>/dev/null)
+  memory_bytes=$("$sysctl_cli" -n hw.memsize 2>/dev/null)
+  if [[ "$pressure" != <-> || "$available_percent" != <-> || "$memory_bytes" != <-> ]]; then
+    REPLY="unable to read host memory pressure"
+    return 1
+  fi
+  available_gib=$((memory_bytes / 1073741824 * available_percent / 100))
+  reasons=()
+  (( fields[3] >= host_min_cpu_idle_percent )) ||
+    reasons+=("CPU ${fields[3]}% idle, need ${host_min_cpu_idle_percent}%")
+  (( fields[4] < host_max_load_average )) ||
+    reasons+=("load average ${fields[4]}, limit ${host_max_load_average}")
+  (( pressure == 1 )) || reasons+=("memory pressure level ${pressure}")
+  (( available_gib - vm_memory_gib >= host_memory_reserve_gib )) ||
+    reasons+=("${available_gib} GiB available, need ${vm_memory_gib} GiB plus ${host_memory_reserve_gib} GiB reserve")
+  REPLY="${(j:; :)reasons}"
+  (( ${#reasons} == 0 ))
+}
+
+# CI shares Jai's working laptop. Start a VM only while the host is not busy
+# and every CI job VM, this one included, fits the fixed budget. On success
+# the caller holds the budget lock until its VM exists in the inventory.
+reserve_vm_capacity() {
+  local vm_cpus="$1" vm_memory_gib="$2"
+  local -a allocation
+  if ! host_capacity_available "$vm_memory_gib"; then
+    REPLY="host busy: ${REPLY}"
+    return 1
+  fi
+  if ! acquire_lock "$budget_lock" "$budget_controllers"; then
+    REPLY="another controller has reserved the CI budget"
+    return 1
+  fi
+  if ! ci_vm_allocation; then
+    release_lock "$budget_lock"
+    REPLY="unable to inventory CI VMs"
+    return 1
+  fi
+  allocation=(${=REPLY})
+  if (( allocation[1] + vm_cpus > budget_cpus || allocation[2] + vm_memory_gib * 1024 > budget_memory_gib * 1024 )); then
+    release_lock "$budget_lock"
+    REPLY="CI budget ${budget_cpus} vCPU / ${budget_memory_gib} GiB has ${allocation[1]} vCPU / $((allocation[2] / 1024)) GiB in use; this VM needs ${vm_cpus} vCPU / ${vm_memory_gib} GiB"
+    return 1
+  fi
+}
+
 run_one_ephemeral_runner() {
-  local repository="$1" lane="${2:-general}" runner_labels suffix vm_name token runner_name runner_pid runner_status claim_result
+  local repository="$1" lane="${2:-general}" runner_labels suffix vm_name token runner_name runner_pid runner_status claim_result vm_cpus vm_memory_gib
   case "$lane" in
     general) runner_labels="$general_runner_labels" ;;
     native) runner_labels=jai-ci-native ;;
@@ -724,12 +878,13 @@ run_one_ephemeral_runner() {
   runner_name="${runner_name_prefix}-${suffix}"
   runner_pid=""
   runner_status=1
+  capacity_deferral=""
 
   cleanup() {
     [[ "$vm_cleanup_required" == true ]] || return 0
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name"
   }
-  trap 'stop_active_timeout; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
+  trap 'stop_active_timeout; release_lock "$budget_lock"; release_selection_lock; cleanup || exit 1; exit 130' INT TERM
 
   {
     if ! repository_is_private "$repository"; then
@@ -737,16 +892,29 @@ run_one_ephemeral_runner() {
       return 1
     fi
 
+    lane_vm_size "$lane" "$repository"
+    vm_cpus="${REPLY%% *}"
+    vm_memory_gib="${REPLY##* }"
+    if ! reserve_vm_capacity "$vm_cpus" "$vm_memory_gib"; then
+      capacity_deferral="$REPLY"
+      return 1
+    fi
+
     # Lima can leave a partially created VM even when clone exits non-zero or
     # the controller is interrupted, so arm cleanup before invoking clone.
     vm_cleanup_required=true
-    log "cloning ${base_vm} to ${vm_name} for ${repository}"
-    run_with_timeout "$clone_timeout_seconds" "$lima_cli" clone "$base_vm" "$vm_name" \
-      --cpus="$cpus" --memory="$memory_gib" --mount-none --start --tty=false || return 1
+    log "cloning ${base_vm} to ${vm_name} for ${repository} with ${vm_cpus} vCPU / ${vm_memory_gib} GiB"
+    if ! run_with_timeout "$clone_timeout_seconds" "$lima_cli" clone "$base_vm" "$vm_name" \
+      --cpus="$vm_cpus" --memory="$vm_memory_gib" --mount-none --start --tty=false; then
+      release_lock "$budget_lock"
+      return 1
+    fi
+    # The VM now counts in the inventory, so other controllers can recheck the budget.
+    release_lock "$budget_lock"
 
     wait_for_guest_package_manager "$vm_name" || return 1
     "$lima_cli" shell "$vm_name" -- \
-      bash -lc 'set -e; test "$(nproc)" = 3; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge 7; docker info >/dev/null; docker compose version; docker buildx version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
+      bash -lc 'set -e; test "$(nproc)" = '"$vm_cpus"'; test "$(free -g | awk '\''/^Mem:/{print $2}'\'')" -ge '"$((vm_memory_gib - 1))"'; docker info >/dev/null; docker compose version; docker buildx version; test -x /opt/actions-runner/bin/Runner.Listener' || return 1
 
     registration_token "$repository" || return 1
     token="$REPLY"
@@ -762,11 +930,26 @@ run_one_ephemeral_runner() {
     resolve_runner_status "$claim_result" "$runner_pid" "$runner_name" || return 1
     runner_status="$REPLY"
   } always {
+    release_lock "$budget_lock"
     release_selection_lock
     trap - INT TERM
     cleanup || return 1
   }
   return "$runner_status"
+}
+
+# A lane VM larger than the budget could never start.
+validate_lane_sizes() {
+  local lane repository
+  for lane in "${lanes[@]}"; do
+    for repository in "${repository_list[@]}"; do
+      lane_vm_size "$lane" "$repository"
+      if (( ${REPLY%% *} > budget_cpus || ${REPLY##* } > budget_memory_gib )); then
+        log "${lane} VM for ${repository} (${REPLY% *} vCPU / ${REPLY#* } GiB) exceeds the CI budget of ${budget_cpus} vCPU / ${budget_memory_gib} GiB"
+        return 1
+      fi
+    done
+  done
 }
 
 main() {
@@ -778,10 +961,7 @@ main() {
     log "TRIPS_LINUX_LIMA_SLOT must be a or b"
     return 1
   fi
-  if [[ "$cpus" != 3 || "$memory_gib" != 8 ]]; then
-    log "resource contract requires 3 CPUs and 8 GiB per Linux slot"
-    return 1
-  fi
+  validate_lane_sizes || return 1
   if [[ ! -s "$private_key" ]]; then
     log "GitHub App private key is missing"
     return 1
@@ -814,6 +994,9 @@ main() {
       repository="$selected_repository"
       if run_one_ephemeral_runner "$repository" "$selected_runner_lane"; then
         log "ephemeral runner completed a job for ${repository}"
+      elif [[ -n "$capacity_deferral" ]]; then
+        log "deferring ${repository} ${selected_runner_lane} work: ${capacity_deferral}; retrying in ${capacity_backoff_seconds} seconds"
+        selection_sleep "$capacity_backoff_seconds"
       else
         log "ephemeral runner cycle failed for ${repository}; retrying in 15 seconds"
         /bin/sleep 15

@@ -23,12 +23,25 @@ readonly log_directory="/Users/jai/Library/Logs/trips-tart-runner"
 readonly work_disk_directory="${TRIPS_TART_WORK_DISK_DIRECTORY:-/Users/jai/.local/share/trips-tart-runner/work-disks}"
 readonly controller_lock="${TRIPS_TART_CONTROLLER_LOCK:-${log_directory}/controller.lock}"
 readonly native_lane_lock="${TRIPS_TART_NATIVE_LANE_LOCK:-/Users/jai/Library/Logs/trips-tart-native-lane.lock}"
+readonly native_lane_controllers='trips-(tart-runner|android-host-runner)-controller'
 readonly minimum_root_free_gib="${TRIPS_TART_MINIMUM_ROOT_FREE_GIB:-20}"
 readonly required_volume="${TRIPS_TART_REQUIRED_VOLUME:-}"
 readonly gh_cli="${TRIPS_TART_GH_CLI:-/opt/homebrew/bin/gh}"
 readonly curl_cli="${TRIPS_TART_CURL_CLI:-/usr/bin/curl}"
 readonly tart_cli="${TRIPS_TART_CLI:-/opt/homebrew/bin/tart}"
 readonly shlock_cli="${TRIPS_TART_SHLOCK_CLI:-/usr/bin/shlock}"
+readonly lima_cli="${TRIPS_TART_LIMA_CLI:-/opt/homebrew/bin/limactl}"
+readonly iostat_cli="${TRIPS_TART_IOSTAT_CLI:-/usr/sbin/iostat}"
+readonly sysctl_cli="${TRIPS_TART_SYSCTL_CLI:-/usr/sbin/sysctl}"
+# Host-wide CI policy, shared with the Lima controller; keep both copies equal.
+readonly budget_lock="${TRIPS_CI_BUDGET_LOCK:-/Users/jai/Library/Logs/trips-ci-vm-budget.lock}"
+readonly budget_controllers='trips-(linux-lima-runner|tart-runner)-controller'
+readonly budget_cpus="${TRIPS_CI_BUDGET_CPUS:-7}"
+readonly budget_memory_gib="${TRIPS_CI_BUDGET_MEMORY_GIB:-24}"
+readonly host_min_cpu_idle_percent="${TRIPS_CI_HOST_MIN_CPU_IDLE_PERCENT:-40}"
+readonly host_max_load_average="${TRIPS_CI_HOST_MAX_LOAD_AVERAGE:-400}"
+readonly host_memory_reserve_gib="${TRIPS_CI_HOST_MEMORY_RESERVE_GIB:-16}"
+readonly host_cpu_sample_seconds="${TRIPS_CI_HOST_CPU_SAMPLE_SECONDS:-5}"
 readonly claim_timeout_seconds="${TRIPS_TART_CLAIM_TIMEOUT_SECONDS:-300}"
 readonly claim_poll_seconds="${TRIPS_TART_CLAIM_POLL_SECONDS:-2}"
 readonly idle_scan_interval_seconds="${TRIPS_TART_IDLE_SCAN_INTERVAL_SECONDS:-30}"
@@ -52,8 +65,45 @@ log() {
   print -r -- "$(timestamp) $*"
 }
 
+# shlock trusts any live PID, but PIDs recycle across reboots: from 2026-10-21
+# to 10-29 a Batteries widget held this controller's old PID 727 and blocked
+# every start. An owner counts only while its command line runs a controller.
+lock_owner_is_controller() {
+  local owner_pid="$1" controllers="$2" command_line
+  [[ "$owner_pid" == <1-> && "$owner_pid" != $$ ]] || return 1
+  command_line=$(/bin/ps -ww -o command= -p "$owner_pid" 2>/dev/null) || return 1
+  [[ " ${command_line} " == *[/\ ]${~controllers}(|.zsh)\ * ]]
+}
+
+read_lock_owner() {
+  REPLY=""
+  [[ -r "$1" ]] && read -r REPLY <"$1"
+  return 0
+}
+
 acquire_lock() {
-  "$shlock_cli" -f "$1" -p $$
+  local lock_path="$1" controllers="$2" guard="${1}.takeover" takeover_status=1
+  "$shlock_cli" -f "$lock_path" -p $$ && return 0
+  read_lock_owner "$lock_path"
+  # A lock that already names this PID is ours, even if an earlier process
+  # with the same recycled PID wrote it.
+  [[ "$REPLY" == $$ ]] && return 0
+  lock_owner_is_controller "$REPLY" "$controllers" && return 1
+  # Serialize the takeover so two contenders cannot both delete and recreate
+  # the lock. A guard left by a dead or recycled PID is cleared for the retry.
+  if ! "$shlock_cli" -f "$guard" -p $$; then
+    read_lock_owner "$guard"
+    lock_owner_is_controller "$REPLY" "$controllers" || /bin/rm -f "$guard"
+    return 1
+  fi
+  read_lock_owner "$lock_path"
+  if ! lock_owner_is_controller "$REPLY" "$controllers"; then
+    log "taking over ${lock_path} from PID ${REPLY:-none}, which is not a runner controller"
+    /bin/rm -f "$lock_path"
+    "$shlock_cli" -f "$lock_path" -p $$ && takeover_status=0
+  fi
+  /bin/rm -f "$guard"
+  return "$takeover_status"
 }
 
 release_lock() {
@@ -62,7 +112,7 @@ release_lock() {
   [[ "$owner_pid" != $$ ]] || /bin/rm -f "$lock_path"
 }
 
-acquire_controller_lock() { acquire_lock "$controller_lock"; }
+acquire_controller_lock() { acquire_lock "$controller_lock" trips-tart-runner-controller; }
 release_controller_lock() { release_lock "$controller_lock"; }
 release_native_lane() {
   [[ "$native_lane_lock_owned" == true ]] || return 0
@@ -350,7 +400,7 @@ print("\n".join(str(vm.get("Name", "")) for vm in vms if vm.get("Name") and vm.g
 }
 
 acquire_clean_native_lane() {
-  if ! acquire_lock "$native_lane_lock"; then
+  if ! acquire_lock "$native_lane_lock" "$native_lane_controllers"; then
     REPLY="$native_lane_lock"
     return 3
   fi
@@ -362,6 +412,93 @@ acquire_clean_native_lane() {
   fi
   release_native_lane
   return "$capacity_status"
+}
+
+# Sum the vCPUs and MiB assigned to every CI job VM, running or not, so a VM
+# that is still being cloned counts against the budget.
+ci_vm_allocation() {
+  setopt local_options pipe_fail
+  local lima_inventory tart_inventory tart_vm tart_vm_config
+  local -a allocation
+  lima_inventory=$("$lima_cli" list --json 2>/dev/null) || return 1
+  allocation=($(printf '%s\n' "$lima_inventory" | /usr/bin/python3 -c 'import json,sys
+cpus=memory=0
+for line in sys.stdin:
+    if line.strip():
+        vm=json.loads(line)
+        if vm["name"].startswith("trips-linux-runner-") and "-job-" in vm["name"]:
+            cpus+=int(vm.get("cpus") or 0); memory+=int(vm.get("memory") or 0)//1048576
+print(cpus, memory)')) || return 1
+  tart_inventory=$("$tart_cli" list --source local --quiet 2>/dev/null) || return 1
+  for tart_vm in ${(f)tart_inventory}; do
+    [[ "$tart_vm" == trips-runner-job-* ]] || continue
+    tart_vm_config=$("$tart_cli" get "$tart_vm" --format json 2>/dev/null) || return 1
+    allocation=($(printf '%s' "$tart_vm_config" | /usr/bin/python3 -c 'import json,sys
+vm=json.load(sys.stdin)
+print(int(sys.argv[1])+int(vm["CPU"]), int(sys.argv[2])+int(vm["Memory"]))' "${allocation[@]}")) || return 1
+  done
+  REPLY="${allocation[*]}"
+}
+
+# The laptop's load average overstates real load: darwinbg simulator threads
+# queue for its two efficiency cores (184 at 31% CPU idle on 2026-10-30), so
+# it only catches thread storms (1,007 on 2026-10-29). Measured CPU idle and
+# the kernel's memory pressure decide.
+host_capacity_available() {
+  local vm_memory_gib="$1" sample pressure available_percent memory_bytes
+  local -a fields reasons
+  local -i available_gib
+  sample=$("$iostat_cli" -n 0 -c 2 -w "$host_cpu_sample_seconds" 2>/dev/null | /usr/bin/tail -n 1)
+  fields=(${=sample})
+  # iostat columns: us sy id 1m 5m 15m; the last row covers the sample interval.
+  if (( ${#fields} != 6 )) || [[ "${fields[3]}" != <-> ]]; then
+    REPLY="unable to sample host CPU"
+    return 1
+  fi
+  pressure=$("$sysctl_cli" -n kern.memorystatus_vm_pressure_level 2>/dev/null)
+  available_percent=$("$sysctl_cli" -n kern.memorystatus_level 2>/dev/null)
+  memory_bytes=$("$sysctl_cli" -n hw.memsize 2>/dev/null)
+  if [[ "$pressure" != <-> || "$available_percent" != <-> || "$memory_bytes" != <-> ]]; then
+    REPLY="unable to read host memory pressure"
+    return 1
+  fi
+  available_gib=$((memory_bytes / 1073741824 * available_percent / 100))
+  reasons=()
+  (( fields[3] >= host_min_cpu_idle_percent )) ||
+    reasons+=("CPU ${fields[3]}% idle, need ${host_min_cpu_idle_percent}%")
+  (( fields[4] < host_max_load_average )) ||
+    reasons+=("load average ${fields[4]}, limit ${host_max_load_average}")
+  (( pressure == 1 )) || reasons+=("memory pressure level ${pressure}")
+  (( available_gib - vm_memory_gib >= host_memory_reserve_gib )) ||
+    reasons+=("${available_gib} GiB available, need ${vm_memory_gib} GiB plus ${host_memory_reserve_gib} GiB reserve")
+  REPLY="${(j:; :)reasons}"
+  (( ${#reasons} == 0 ))
+}
+
+# CI shares Jai's working laptop. Start the VM only while the host is not busy
+# and every CI job VM, this one included, fits the fixed budget. iOS work has
+# priority, so a deferred reservation keeps the budget lock: Linux slots cannot
+# start new VMs until this VM fits. The caller releases it once its VM exists.
+reserve_vm_capacity() {
+  local vm_cpus="$1" vm_memory_gib="$2"
+  local -a allocation
+  if ! acquire_lock "$budget_lock" "$budget_controllers"; then
+    REPLY="another controller has reserved the CI budget"
+    return 1
+  fi
+  if ! host_capacity_available "$vm_memory_gib"; then
+    REPLY="host busy: ${REPLY}"
+    return 1
+  fi
+  if ! ci_vm_allocation; then
+    REPLY="unable to inventory CI VMs"
+    return 1
+  fi
+  allocation=(${=REPLY})
+  if (( allocation[1] + vm_cpus > budget_cpus || allocation[2] + vm_memory_gib * 1024 > budget_memory_gib * 1024 )); then
+    REPLY="CI budget ${budget_cpus} vCPU / ${budget_memory_gib} GiB has ${allocation[1]} vCPU / $((allocation[2] / 1024)) GiB in use; this VM needs ${vm_cpus} vCPU / ${vm_memory_gib} GiB"
+    return 1
+  fi
 }
 
 start_tart_vm() {
@@ -505,7 +642,7 @@ runner_cycle_log_message() {
 }
 
 run_one_ephemeral_runner() {
-  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready linux_runner_count lane_status cleanup_status operation_status runner_home_cache_setup runner_environment_setup
+  local repository="$1" suffix vm_name vm_log vm_pid vm_ip token runner_name runner_pid runner_status work_disk ssh_ready lane_status cleanup_status operation_status runner_home_cache_setup runner_environment_setup
   suffix="$(/bin/date -u '+%Y%m%d%H%M%S')-$$"
   vm_name="trips-runner-job-${suffix}"
   runner_name="${runner_name_prefix}-${suffix}"
@@ -522,17 +659,6 @@ run_one_ephemeral_runner() {
     return 1
   fi
 
-  while true; do
-    linux_runner_count=$(
-      /opt/homebrew/bin/limactl list --json 2>/dev/null |
-        /usr/bin/python3 -c 'import json,sys; [print(json.loads(line)["name"]) for line in sys.stdin if line.strip()]' |
-        /usr/bin/grep -c '^trips-linux-runner-[ab]-job-' || true
-    )
-    (( linux_runner_count <= 2 )) && break
-    log "waiting for Linux runner count to return to the two-slot contract"
-    /bin/sleep 15
-  done
-
   if acquire_clean_native_lane; then
     :
   else
@@ -542,11 +668,20 @@ run_one_ephemeral_runner() {
     return "$native_capacity_deferred_status"
   fi
 
+  if ! reserve_vm_capacity "$base_cpus" "$((base_memory_mb / 1024))"; then
+    native_capacity_reason="$REPLY"
+    release_native_lane
+    return "$native_capacity_deferred_status"
+  fi
+
   log "cloning ${base_vm} to ${vm_name}"
   "$tart_cli" clone "$base_vm" "$vm_name" || {
+    release_lock "$budget_lock"
     release_native_lane
     return 1
   }
+  # The VM now counts in the inventory, so other controllers can recheck the budget.
+  release_lock "$budget_lock"
 
   cleanup_vm() {
     cleanup_runner_vm "$repository" "$runner_name" "$vm_name" "$work_disk"
@@ -643,7 +778,7 @@ main() {
     log "another iOS runner controller owns ${controller_lock}"
     return 1
   fi
-  trap 'release_native_lane; release_controller_lock' EXIT
+  trap 'release_native_lane; release_lock "$budget_lock"; release_controller_lock' EXIT
   if [[ -n "$required_volume" ]] && ! /sbin/mount | /usr/bin/grep -Fq " on ${required_volume} ("; then
     log "required volume ${required_volume} is not mounted"
     return 1
@@ -669,6 +804,10 @@ main() {
   fi
   if [[ "$base_cpus" != 4 || "$base_memory_mb" != 16384 ]]; then
     log "resource contract requires 4 CPUs and 16384 MB for iOS"
+    return 1
+  fi
+  if (( base_cpus > budget_cpus || base_memory_mb > budget_memory_gib * 1024 )); then
+    log "the iOS VM exceeds the CI budget of ${budget_cpus} vCPU / ${budget_memory_gib} GiB"
     return 1
   fi
   if ! "$tart_cli" set "$base_vm" --cpu "$base_cpus" --memory "$base_memory_mb"; then
@@ -699,11 +838,15 @@ main() {
           /bin/sleep "$idle_scan_interval_seconds"
           ;;
         *)
+          # Only a deferred reservation keeps its budget claim.
+          release_lock "$budget_lock"
           /bin/sleep 30
           ;;
       esac
     else
       scan_status=$?
+      # No iOS job is waiting any more, so drop a deferred budget claim.
+      release_lock "$budget_lock"
       if (( scan_status == 1 )); then
         /bin/sleep "$idle_scan_interval_seconds"
       else

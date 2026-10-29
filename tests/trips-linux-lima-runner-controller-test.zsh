@@ -151,6 +151,9 @@ if [[ "$1" == list && "${FAKE_VM_PRESENT:-false}" == true ]]; then
   exit 0
 fi
 if [[ "$1" == list ]]; then
+  for (( vm = 1; vm <= ${FAKE_LIMA_JOB_VMS:-0}; vm++ )); do
+    print -r -- '{"name":"trips-linux-runner-b-job-'"$vm"'","status":"Running","cpus":3,"memory":8589934592}'
+  done
   exit 0
 fi
 if [[ "$1" == clone && "${FAKE_CLONE_FAILURE:-false}" == true ]]; then
@@ -160,12 +163,63 @@ exit 0
 SCRIPT
 chmod 700 "$fake_lima"
 
+fake_tart="${test_directory}/tart"
+cat > "$fake_tart" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+case "$1" in
+  list) [[ -z "${FAKE_TART_JOB_VM:-}" ]] || print -r -- "$FAKE_TART_JOB_VM" ;;
+  get) print -r -- '{"CPU":4,"Memory":16384,"State":"running"}' ;;
+  *) exit 64 ;;
+esac
+SCRIPT
+chmod 700 "$fake_tart"
+
+fake_iostat="${test_directory}/iostat"
+cat > "$fake_iostat" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+print -r -- '      cpu    load average'
+print -r -- ' us sy id   1m   5m   15m'
+print -r -- ' 20 10 70  30.00 30.00 30.00'
+print -r -- " 5 5 ${FAKE_CPU_IDLE:-90}  ${FAKE_LOAD_AVERAGE:-12.50} 20.00 20.00"
+SCRIPT
+chmod 700 "$fake_iostat"
+
+fake_sysctl="${test_directory}/sysctl"
+cat > "$fake_sysctl" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+case "$2" in
+  kern.memorystatus_vm_pressure_level) print -r -- "${FAKE_MEMORY_PRESSURE:-1}" ;;
+  kern.memorystatus_level) print -r -- "${FAKE_MEMORY_AVAILABLE_PERCENT:-80}" ;;
+  hw.memsize) print -r -- 68719476736 ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod 700 "$fake_sysctl"
+
+# GitHub's Ubuntu image has no shlock; this creates the file only if absent.
+fake_shlock="${test_directory}/shlock"
+cat > "$fake_shlock" <<'SCRIPT'
+#!/bin/zsh
+set -eu
+[[ "$1" == -f && "$3" == -p ]] || exit 64
+(setopt noclobber; print -r -- "$4" > "$2") 2>/dev/null
+SCRIPT
+chmod 700 "$fake_shlock"
+
 export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_LINUX_LIMA_SLOT=a
 export LIMA_HOME="${test_directory}/lima-home"
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
 export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"
 export TRIPS_LINUX_LIMA_CLI="$fake_lima"
+export TRIPS_LINUX_LIMA_TART_CLI="$fake_tart"
+export TRIPS_LINUX_LIMA_IOSTAT_CLI="$fake_iostat"
+export TRIPS_LINUX_LIMA_SYSCTL_CLI="$fake_sysctl"
+export TRIPS_LINUX_LIMA_SHLOCK_CLI="$fake_shlock"
+export TRIPS_CI_BUDGET_LOCK="${test_directory}/ci-vm-budget.lock"
 export TRIPS_LINUX_LIMA_REPOSITORIES='jai/tonegate,jai/trips-api,jai/trips-frontend'
 export TRIPS_LINUX_LIMA_CLAIM_TIMEOUT_SECONDS=1
 export TRIPS_LINUX_LIMA_CLAIM_POLL_SECONDS=0.1
@@ -177,6 +231,13 @@ source "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"
 mkdir -p "$LIMA_HOME"
 installation_token_value=test-token
 installation_token_expires_at=4102444800
+
+# Reservations held by the other slot need a live process whose command line
+# names the controller; this test process's command line does not. It is
+# disowned so the bare `wait` calls below do not wait for it.
+/bin/zsh -c 'while :; do /bin/sleep 1; done' trips-linux-lima-runner-controller &!
+other_slot_pid=$!
+trap '/bin/kill "$other_slot_pid" 2>/dev/null; /bin/rm -rf -- "$test_directory"' EXIT
 
 assert_equal() {
   [[ "$1" == "$2" ]] || { print -u2 -- "Expected '$1', got '$2'"; return 1; }
@@ -244,7 +305,7 @@ export FAKE_DEPLOY_SCENARIO=queued
 selection_lock_path jai/trips-frontend
 deploy_reserved_lock="$REPLY"
 mkdir "$deploy_reserved_lock"
-print -r -- $$ > "${deploy_reserved_lock}/pid"
+print -r -- "$other_slot_pid" > "${deploy_reserved_lock}/pid"
 if next_repository; then
   print -u2 -- 'A slot must retry the pending deploy reservation instead of taking general work'
   exit 1
@@ -305,7 +366,7 @@ export FAKE_NATIVE_SCENARIO=queued
 selection_lock_path jai/trips-frontend
 native_reserved_lock="$REPLY"
 mkdir "$native_reserved_lock"
-print -r -- $$ > "${native_reserved_lock}/pid"
+print -r -- "$other_slot_pid" > "${native_reserved_lock}/pid"
 next_repository
 assert_equal jai/tonegate "$selected_repository"
 assert_equal general "$selected_runner_lane"
@@ -379,7 +440,7 @@ unset FAKE_DEPLOY_SCENARIO
 selection_lock_path jai/trips-api
 validation_reserved_lock="$REPLY"
 mkdir "$validation_reserved_lock"
-print -r -- $$ > "${validation_reserved_lock}/pid"
+print -r -- "$other_slot_pid" > "${validation_reserved_lock}/pid"
 export FAKE_DELIVERY_SCENARIO=queued
 if next_repository; then
   print -u2 -- 'Validation contention must retry before delivery or general work'
@@ -517,7 +578,7 @@ unset FAKE_DEPLOY_SCENARIO
 selection_lock_path jai/trips-api
 delivery_reserved_lock="$REPLY"
 mkdir "$delivery_reserved_lock"
-print -r -- $$ > "${delivery_reserved_lock}/pid"
+print -r -- "$other_slot_pid" > "${delivery_reserved_lock}/pid"
 if next_repository; then
   print -u2 -- 'Delivery contention must retry before generic metadata work'
   exit 1
@@ -590,7 +651,7 @@ repository_scan_start_index=1
 selection_lock_path jai/tonegate
 reserved_tonegate_lock="$REPLY"
 mkdir "$reserved_tonegate_lock"
-print -r -- $$ > "${reserved_tonegate_lock}/pid"
+print -r -- "$other_slot_pid" > "${reserved_tonegate_lock}/pid"
 next_repository
 assert_equal jai/trips-api "$selected_repository"
 release_selection_lock
@@ -599,7 +660,7 @@ rm -rf "$reserved_tonegate_lock"
 api_queued_at=""
 frontend_queued_at=""
 mkdir "$reserved_tonegate_lock"
-print -r -- $$ > "${reserved_tonegate_lock}/pid"
+print -r -- "$other_slot_pid" > "${reserved_tonegate_lock}/pid"
 if next_repository; then
   print -u2 -- 'Expected reservation contention to defer selection'
   exit 1
@@ -627,6 +688,33 @@ mkdir "$ownerless_tonegate_lock"
 acquire_selection_lock jai/tonegate
 assert_equal "$ownerless_tonegate_lock" "$selected_repository_lock"
 release_selection_lock
+
+# A reservation or reclaim guard whose PID was recycled by an unrelated live
+# process is stale, as is a reservation naming this slot's own PID.
+/bin/sleep 30 &
+recycled_pid=$!
+selection_lock_path jai/tonegate
+recycled_tonegate_lock="$REPLY"
+for stale_owner in "$recycled_pid" $$; do
+  mkdir "$recycled_tonegate_lock"
+  print -r -- "$stale_owner" > "${recycled_tonegate_lock}/pid"
+  acquire_selection_lock jai/tonegate
+  assert_equal "$recycled_tonegate_lock" "$selected_repository_lock"
+  assert_equal $$ "$(cat "${recycled_tonegate_lock}/pid")"
+  release_selection_lock
+done
+mkdir "$recycled_tonegate_lock" "${recycled_tonegate_lock}.reclaim"
+print -r -- "$recycled_pid" > "${recycled_tonegate_lock}/pid"
+print -r -- "$recycled_pid" > "${recycled_tonegate_lock}.reclaim/pid"
+if acquire_selection_lock jai/tonegate; then
+  print -u2 -- 'Expected a recycled reclaim guard to defer this attempt'
+  exit 1
+fi
+[[ ! -d "${recycled_tonegate_lock}.reclaim" ]]
+acquire_selection_lock jai/tonegate
+release_selection_lock
+/bin/kill "$recycled_pid" 2>/dev/null || true
+wait "$recycled_pid" 2>/dev/null || true
 
 stale_contention_home="${test_directory}/stale-contention-locks"
 stale_contention_lock="${stale_contention_home}/.trips-linux-runner-selection-lock-jai-tonegate"
@@ -798,6 +886,60 @@ assert_equal unlocked "$claim_resolution_lock_state"
   [[ -z "$selected_repository_lock" && ! -d "$validation_lock" ]] || exit 1
   /usr/bin/grep -q '^jai/trips-api borg-cube-03-lima-a-.* trips-linux-runner-a-job-' "${test_directory}/validation-cleanup"
 )
+(
+  export FAKE_LIMA_REQUEST_LOG="${test_directory}/capacity.log"
+  : > "$FAKE_LIMA_REQUEST_LOG"
+  acquire_selection_lock jai/trips-api
+  capacity_lock="$selected_repository_lock"
+  if FAKE_CPU_IDLE=10 run_one_ephemeral_runner jai/trips-api delivery; then
+    print -u2 -- 'Expected a busy host to defer the Linux VM'
+    exit 1
+  fi
+  assert_equal 'host busy: CPU 10% idle, need 40%' "$capacity_deferral"
+  [[ -z "$selected_repository_lock" && ! -d "$capacity_lock" ]] || {
+    print -u2 -- 'A deferred Linux VM must release its repository reservation'
+    exit 1
+  }
+  # While the iOS VM runs, only one Linux VM fits the budget.
+  if FAKE_LIMA_JOB_VMS=1 FAKE_TART_JOB_VM=trips-runner-job-ios run_one_ephemeral_runner jai/trips-api delivery; then
+    print -u2 -- 'Expected the iOS VM to leave room for one Linux VM only'
+    exit 1
+  fi
+  assert_equal 'CI budget 7 vCPU / 24 GiB has 7 vCPU / 24 GiB in use; this VM needs 3 vCPU / 8 GiB' "$capacity_deferral"
+  # A Tart controller that deferred its VM keeps the budget lock, so Linux
+  # slots cannot start new VMs ahead of iOS work.
+  /bin/zsh -c 'sleep 30; :' trips-tart-runner-controller &
+  ios_claim_pid=$!
+  print -r -- "$ios_claim_pid" > "$TRIPS_CI_BUDGET_LOCK"
+  if run_one_ephemeral_runner jai/trips-api delivery; then
+    print -u2 -- 'Expected a deferred iOS reservation to hold the Linux slot back'
+    exit 1
+  fi
+  assert_equal 'another controller has reserved the CI budget' "$capacity_deferral"
+  assert_equal "$ios_claim_pid" "$(cat "$TRIPS_CI_BUDGET_LOCK")"
+  /bin/kill "$ios_claim_pid"
+  wait "$ios_claim_pid" 2>/dev/null || true
+  /bin/rm -f "$TRIPS_CI_BUDGET_LOCK"
+  if /usr/bin/grep -q '^clone ' "$FAKE_LIMA_REQUEST_LOG"; then
+    print -u2 -- 'A deferred Linux VM reached Lima clone'
+    exit 1
+  fi
+  # Two Linux VMs fit when no iOS VM runs; the lane size reaches clone and the guest check.
+  FAKE_LIMA_JOB_VMS=1 run_one_ephemeral_runner jai/trips-api delivery
+  assert_equal '' "$capacity_deferral"
+  /usr/bin/grep -q -- '^clone trips-linux-runner-base trips-linux-runner-a-job-.* --cpus=3 --memory=8 ' "$FAKE_LIMA_REQUEST_LOG"
+  /usr/bin/grep -Fq -- 'test "$(nproc)" = 3; test "$(free -g' "$FAKE_LIMA_REQUEST_LOG"
+  /usr/bin/grep -Fq -- '-ge 7; docker info' "$FAKE_LIMA_REQUEST_LOG"
+  [[ ! -e "$TRIPS_CI_BUDGET_LOCK" ]] || {
+    print -u2 -- 'The budget lock must be released once the VM exists'
+    exit 1
+  }
+)
+validate_lane_sizes
+if TRIPS_CI_BUDGET_CPUS=2 /bin/zsh -c 'source "$1"; validate_lane_sizes' zsh "${repo_root}/scripts/trips-linux-lima-runner-controller.zsh"; then
+  print -u2 -- 'Expected a lane VM larger than the budget to fail startup validation'
+  exit 1
+fi
 functions[repository_is_private]="$production_repository_is_private"
 functions[wait_for_guest_package_manager]="$production_wait_for_guest_package_manager"
 functions[registration_token]="$production_registration_token"
