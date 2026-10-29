@@ -1,7 +1,8 @@
 # Auto-Merge Workflow
-# Enables auto-merge (squash) on PRs as soon as they're opened.
-# Merge won't happen until all branch protection / ruleset requirements are met.
-# Called by downstream repos via workflow_call.
+# Enables auto-merge (squash) on bot PRs (Dependabot, the OpenAPI sync) as soon
+# as they're opened. Merge won't happen until the ruleset's required checks pass.
+# People and agents push to main, and the factory merges its own PRs, so other
+# PRs are left alone. Called by downstream repos via workflow_call.
 #
 # IMPORTANT: callers should explicitly pass JAI_CI_PERSONAL_ACCESS_TOKEN
 # so the eventual squash-merge push to main is authored by the PAT owner
@@ -27,7 +28,7 @@ permissions:
 
 jobs:
   enable-auto-merge:
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ !github.event.pull_request.draft && contains(fromJSON('["dependabot[bot]", "jai-bot-reviewer"]'), github.event.pull_request.user.login) }}
     runs-on: [self-hosted, linux, arm64, jai-ci]
     steps:
       - name: Enable auto-merge (squash)
