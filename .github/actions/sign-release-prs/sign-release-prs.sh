@@ -52,6 +52,9 @@ sign_branch() {
   echo "Signed ${branch} as ${commit}"
 }
 
-jq -r '.[].headBranchName' <<<"$PRS" | while IFS= read -r branch; do
+# Ask GitHub for open release PRs: release-please reports only the PRs it
+# changed, so an unchanged unsigned PR would otherwise stay blocked.
+gh pr list --repo "$GITHUB_REPOSITORY" --state open --label 'autorelease: pending' \
+  --json headRefName --jq '.[].headRefName' | while IFS= read -r branch; do
   (sign_branch "$branch")
 done
