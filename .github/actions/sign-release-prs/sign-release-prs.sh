@@ -57,4 +57,5 @@ sign_branch() {
 gh pr list --repo "$GITHUB_REPOSITORY" --state open --label 'autorelease: pending' \
   --json headRefName --jq '.[].headRefName' | while IFS= read -r branch; do
   (sign_branch "$branch")
+  gh pr merge "$branch" --repo "$GITHUB_REPOSITORY" --auto --squash
 done

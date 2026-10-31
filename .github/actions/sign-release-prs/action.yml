@@ -1,5 +1,5 @@
 name: Sign release PRs
-description: Rebuild release-please PR heads as GitHub-signed commits, because main only accepts verified commits.
+description: Rebuild open release-please PRs as GitHub-signed commits, because main only accepts verified commits, then enroll them in auto-merge.
 inputs:
   token:
     description: Token that can write the PR branch and trigger its checks.
