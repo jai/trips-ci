@@ -211,6 +211,7 @@ chmod 700 "$fake_shlock"
 
 export TRIPS_LINUX_RUNNER_CONTROLLER_LIBRARY_ONLY=true
 export TRIPS_LINUX_LIMA_SLOT=a
+export TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX=borg-cube-03-lima-a
 export LIMA_HOME="${test_directory}/lima-home"
 export TRIPS_LINUX_LIMA_GH_CLI="$fake_gh"
 export TRIPS_LINUX_LIMA_CURL_CLI="$fake_curl"

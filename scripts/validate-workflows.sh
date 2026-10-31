@@ -48,6 +48,8 @@ zsh -n \
 plist_files=(
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist"
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-c.plist"
+  "$repo_root/launchd/com.jai.trips-linux-lima-runner-d.plist"
   "$repo_root/launchd/com.jai.trips-tart-runner.plist"
   "$repo_root/launchd/com.jai.trips-android-host-runner.plist"
 )

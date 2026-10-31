@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jai.trips-linux-lima-runner-c</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jai/.local/bin/start-trips-linux-lima-runner.zsh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TRIPS_LINUX_LIMA_SLOT</key>
+    <string>c</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner-c.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jai/Library/Logs/trips-linux-lima-runner-c.err</string>
+</dict>
+</plist>

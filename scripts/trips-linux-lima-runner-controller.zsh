@@ -8,10 +8,10 @@ readonly installation_id="${TRIPS_TART_GITHUB_INSTALLATION_ID:-150444191}"
 readonly repositories="${TRIPS_LINUX_LIMA_REPOSITORIES:-jai/trips-api,jai/trips-frontend,jai/trips-email-ingest-worker,jai/trips-infra,jai/trips,jai/trips-fastlane,jai/openclaw-prompts,jai/tonegate}"
 readonly -a repository_list=(${(s:,:)repositories})
 readonly base_vm="${TRIPS_LINUX_LIMA_BASE_VM:-trips-linux-runner-base}"
-readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a or b}"
+readonly slot="${TRIPS_LINUX_LIMA_SLOT:?TRIPS_LINUX_LIMA_SLOT must be a, b, c or d}"
 readonly -a lanes=(general native deploy validation delivery)
 readonly runner_root="/opt/actions-runner"
-readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-borg-cube-03-lima-${slot}}"
+readonly runner_name_prefix="${TRIPS_LINUX_LIMA_RUNNER_NAME_PREFIX:-$(/bin/hostname -s)-lima-${slot}}"
 readonly general_runner_labels="jai-ci,jai-ci-tonegate"
 readonly native_repository="jai/trips-frontend"
 readonly -a deploy_repositories=(jai/trips-frontend jai/trips-api)
@@ -58,7 +58,11 @@ typeset -g selected_repository_lock=""
 typeset -g active_timeout_pid=""
 typeset -g capacity_deferral=""
 typeset -gi repository_scan_start_index=1
-[[ "$slot" == b ]] && repository_scan_start_index=2
+case "$slot" in
+  b) repository_scan_start_index=2 ;;
+  c) repository_scan_start_index=3 ;;
+  d) repository_scan_start_index=4 ;;
+esac
 
 export LIMA_HOME="${LIMA_HOME:-/Users/jai/.lima}"
 
@@ -971,8 +975,8 @@ main() {
   local -i scan_status
   umask 077
   mkdir -p "$log_directory"
-  if [[ "$slot" != "a" && "$slot" != "b" ]]; then
-    log "TRIPS_LINUX_LIMA_SLOT must be a or b"
+  if [[ "$slot" != [abcd] ]]; then
+    log "TRIPS_LINUX_LIMA_SLOT must be a, b, c or d"
     return 1
   fi
   validate_lane_sizes || return 1
