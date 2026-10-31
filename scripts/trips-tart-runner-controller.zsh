@@ -470,6 +470,8 @@ host_capacity_available() {
   (( fields[4] < host_max_load_average )) ||
     reasons+=("load average ${fields[4]}, limit ${host_max_load_average}")
   (( pressure == 1 )) || reasons+=("memory pressure level ${pressure}")
+  [[ -z "${TRIPS_CI_HOST_ALLOWED_DAYS:-}" || ",${TRIPS_CI_HOST_ALLOWED_DAYS}," == *,$(/bin/date +%u),* ]] ||
+    reasons+=("today is outside CI days ${TRIPS_CI_HOST_ALLOWED_DAYS}")
   (( available_gib - vm_memory_gib >= host_memory_reserve_gib )) ||
     reasons+=("${available_gib} GiB available, need ${vm_memory_gib} GiB plus ${host_memory_reserve_gib} GiB reserve")
   REPLY="${(j:; :)reasons}"

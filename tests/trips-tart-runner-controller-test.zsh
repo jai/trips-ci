@@ -602,6 +602,11 @@ if FAKE_CPU_IDLE=39 host_capacity_available 16; then
   exit 1
 fi
 assert_equal 'CPU 39% idle, need 40%' "$REPLY"
+TRIPS_CI_HOST_ALLOWED_DAYS=1,2,3,4,5,6,7 host_capacity_available 16
+if TRIPS_CI_HOST_ALLOWED_DAYS=0 host_capacity_available 16; then
+  print -u2 -- 'A host outside its CI days must defer new VMs'
+  exit 1
+fi
 FAKE_LOAD_AVERAGE=183.84 host_capacity_available 16
 if FAKE_LOAD_AVERAGE=400.25 host_capacity_available 16; then
   print -u2 -- 'Expected a runaway load average to defer VM start'
