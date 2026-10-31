@@ -12,10 +12,9 @@
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
 - Runner controllers that execute all private Trips CI on Jai's laptop `borg-cube-03` and, for Linux, on `borg-cube-04`:
   - `scripts/trips-linux-lima-runner-controller.zsh` — ephemeral Lima Ubuntu ARM64 slots, labels `self-hosted, linux, arm64, jai-ci`.
-    Both slots select native preparation, deployment, validation (`jai-ci-validation`; no Trips workflow requests it now), delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
+    Slots select native preparation, deployment, delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
     `borg-cube-03` runs slots `a` and `b` at the default budget. `borg-cube-04` runs `a` to `d` on weekends only, with its budget and days in `~/.config/trips-ci/host.env`.
   - `scripts/trips-tart-runner-controller.zsh` — one ephemeral macOS Tart slot for iOS build / TestFlight / Maestro, labels `self-hosted, macOS, ARM64, tart, ios`.
-  - `scripts/trips-android-host-runner-controller.zsh` — ephemeral Android host runner, labels `self-hosted, macOS, ARM64, borg-cube-03, android`; shares the native lane lock with iOS.
   - `launchd/*.plist` keep the controllers running headlessly; `scripts/provision-*-runner-base.zsh` build the base images.
 - This repo is public and its own CI runs on GitHub-hosted `ubuntu-latest`.
 

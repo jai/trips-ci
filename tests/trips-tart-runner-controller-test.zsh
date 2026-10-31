@@ -575,13 +575,13 @@ fi
 acquire_controller_lock
 release_controller_lock
 
-# The native lane is shared with the Android controller: its live lock holds,
+# The native lane lock names a live controller: its live lock holds,
 # while a recycled PID in the same lock is taken over.
-/bin/zsh -c 'sleep 30; :' trips-android-host-runner-controller &
-android_stand_in_pid=$!
-print -r -- "$android_stand_in_pid" > "$TRIPS_TART_NATIVE_LANE_LOCK"
+/bin/zsh -c 'sleep 30; :' trips-tart-runner-controller &
+controller_stand_in_pid=$!
+print -r -- "$controller_stand_in_pid" > "$TRIPS_TART_NATIVE_LANE_LOCK"
 if acquire_clean_native_lane; then
-  print -u2 -- 'Expected a live Android controller to keep the native lane'
+  print -u2 -- 'Expected a live controller to keep the native lane'
   exit 1
 else
   assert_equal 3 "$?"
@@ -591,8 +591,8 @@ acquire_clean_native_lane
 assert_equal $$ "$(cat "$TRIPS_TART_NATIVE_LANE_LOCK")"
 release_native_lane
 [[ ! -e "$TRIPS_TART_NATIVE_LANE_LOCK" ]]
-kill "$recycled_pid" "$android_stand_in_pid" 2>/dev/null || true
-wait "$recycled_pid" "$android_stand_in_pid" 2>/dev/null || true
+kill "$recycled_pid" "$controller_stand_in_pid" 2>/dev/null || true
+wait "$recycled_pid" "$controller_stand_in_pid" 2>/dev/null || true
 
 # Host gate: CPU idle and memory pressure decide, not the inflated load average.
 host_capacity_available 16
