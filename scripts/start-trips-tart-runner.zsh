@@ -3,6 +3,14 @@ set -eu
 
 PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Capacity differs per host; shared with the Lima wrapper.
+readonly host_config="/Users/jai/.config/trips-ci/host.env"
+if [[ -r "$host_config" ]]; then
+  set -a
+  source "$host_config"
+  set +a
+fi
+
 export TART_HOME="${TART_HOME:-/Users/jai/.tart}"
 export TRIPS_TART_RUNNER_HOST_LABEL="borg-cube-03"
 export TRIPS_TART_RUNNER_NAME_PREFIX="borg-cube-03-tart"
