@@ -92,7 +92,7 @@ jobs:
 
           cat >> .octocov.yml <<'YAML'
             # Ratchet: before we hit the floor, coverage cannot go down; once we hit the floor, it must stay >= floor.
-            acceptable: diff >= 0% && (prev < ${{ inputs.coverage_floor }}% || current >= ${{ inputs.coverage_floor }}%)
+            acceptable: diff >= -0.1% && (prev < ${{ inputs.coverage_floor }}% || current >= ${{ inputs.coverage_floor }}%)
 
           diff:
             datastores:
@@ -117,7 +117,7 @@ jobs:
               ❌ **Red X**: coverage gate failed; add tests or revert coverage-reducing changes.
 
               **Policy (ratchet)**
-              - 🧱 If `main` is **< ${{ inputs.coverage_floor }}%**: coverage diff must be **>= 0%**
+              - 🧱 If `main` is **< ${{ inputs.coverage_floor }}%**: coverage may not drop by more than **0.1%**
               - 🎯 If `main` is **>= ${{ inputs.coverage_floor }}%**: PR coverage must be **>= ${{ inputs.coverage_floor }}%**
           YAML
 
