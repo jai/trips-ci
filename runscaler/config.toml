@@ -1,0 +1,30 @@
+log-level = "info"
+log-format = "text"
+concurrent = 3
+health-address = "127.0.0.1"
+health-port = 18080
+provider = "docker"
+runner-image = "localhost:5000/trips-runner:ci"
+runner-group = "default"
+max-runners = 3
+
+[docker]
+socket = "/var/run/docker.sock"
+dind = true
+network = "host"
+shared-volume = ""
+prune = true
+buildx-cleanup = true
+cache-volumes = [
+  "go-mod:/home/runner/go/pkg/mod",
+  "go-build:/home/runner/.cache/go-build",
+  "npm:/home/runner/.npm",
+  "tool-cache:/home/runner/_work/_tool",
+]
+
+[[scaleset]]
+url = "https://github.com/jai/trips-api"
+name = "trips-api"
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"

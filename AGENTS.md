@@ -10,7 +10,8 @@
 
 - Shared GitHub Actions workflows for Trips repositories.
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
-- Runner controllers that execute all private Trips CI on Jai's laptop `borg-cube-03` and, for Linux, on `borg-cube-04`:
+- `runscaler/` holds the image and config for `runscaler`, which runs `trips-api` CI in the Colima profile `ci` on `borg-cube-03`; `launchd/com.jai.trips-colima-ci.plist` starts it at login.
+- Runner controllers that execute the other private Trips CI on Jai's laptop `borg-cube-03` and, for Linux, on `borg-cube-04`:
   - `scripts/trips-linux-lima-runner-controller.zsh` — ephemeral Lima Ubuntu ARM64 slots, labels `self-hosted, linux, arm64, jai-ci`.
     Slots select native preparation, deployment, delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
     `borg-cube-03` runs 1 big slot (Tart) and 2 small slots (Lima `a`, `b`), set in its `~/.config/trips-ci/host.env`. `borg-cube-04` runs `a` to `d` on weekends only, with its budget and days in `~/.config/trips-ci/host.env`.

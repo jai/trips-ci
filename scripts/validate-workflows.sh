@@ -46,6 +46,7 @@ plist_files=(
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-c.plist"
   "$repo_root/launchd/com.jai.trips-linux-lima-runner-d.plist"
+  "$repo_root/launchd/com.jai.trips-colima-ci.plist"
   "$repo_root/launchd/com.jai.trips-tart-runner.plist"
 )
 if command -v plutil >/dev/null 2>&1; then
