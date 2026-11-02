@@ -1,6 +1,6 @@
 log-level = "info"
 log-format = "text"
-concurrent = 3
+concurrent = 4
 health-address = "127.0.0.1"
 health-port = 18080
 provider = "docker"
@@ -19,12 +19,62 @@ cache-volumes = [
   "go-mod:/home/runner/go/pkg/mod",
   "go-build:/home/runner/.cache/go-build",
   "npm:/home/runner/.npm",
+  "playwright:/home/runner/.cache/ms-playwright",
   "tool-cache:/home/runner/_work/_tool",
 ]
 
 [[scaleset]]
 url = "https://github.com/jai/trips-api"
 name = "trips-api"
+labels = ["trips-api", "self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-frontend"
+name = "trips-frontend"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-email-ingest-worker"
+name = "trips-email-ingest-worker"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-infra"
+name = "trips-infra"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips"
+name = "trips"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/openclaw-prompts"
+name = "openclaw-prompts"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/tonegate"
+name = "tonegate"
+labels = ["self-hosted", "linux", "arm64", "jai-ci-tonegate"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
 github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
