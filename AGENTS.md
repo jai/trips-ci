@@ -10,13 +10,7 @@
 
 - Shared GitHub Actions workflows for Trips repositories.
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
-- `runscaler/` holds the image and config for `runscaler`, which runs `trips-api` CI in the Colima profile `ci` on `borg-cube-03`; `launchd/com.jai.trips-colima-ci.plist` starts it at login.
-- Runner controllers that execute the other private Trips CI on Jai's laptop `borg-cube-03` and, for Linux, on `borg-cube-04`:
-  - `scripts/trips-linux-lima-runner-controller.zsh` — ephemeral Lima Ubuntu ARM64 slots, labels `self-hosted, linux, arm64, jai-ci`.
-    Slots select native preparation, deployment, delivery CI, then general jobs; active jobs finish before the next selection. Deploy the controller before retriggering callers to use the updated reusable workflow.
-    `borg-cube-03` runs 1 big slot (Tart) and 2 small slots (Lima `a`, `b`), set in its `~/.config/trips-ci/host.env`. `borg-cube-04` runs `a` to `d` on weekends only, with its budget and days in `~/.config/trips-ci/host.env`.
-  - `scripts/trips-tart-runner-controller.zsh` — one ephemeral macOS Tart slot for iOS build / TestFlight / Maestro, labels `self-hosted, macOS, ARM64, tart, ios`.
-  - `launchd/*.plist` keep the controllers running headlessly; `scripts/provision-*-runner-base.zsh` build the base images.
+- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). All private Trips CI runs on `runscaler` on Jai's laptop `borg-cube-03`: Linux jobs as containers in the Colima profile `ci`, iOS jobs as Tart VMs cloned from the local image `trips-runner-golden`. `launchd/com.jai.trips-colima-ci.plist` starts the Linux side at login; the iOS side is the launchd service `io.github.ysya.runner`. `scripts/provision-tart-runner-base.zsh` builds a new macOS base.
 - This repo is public and its own CI runs on GitHub-hosted `ubuntu-latest`.
 
 ## Project Mode (Solo MVP)
@@ -41,7 +35,7 @@
 - Prefer small workflow changes with clear validation.
 - Avoid compatibility indirection unless explicitly requested.
 - Ship quickly, but keep critical gating checks reliable.
-- After pushing controller changes, redeploy the exact scripts/plists to `borg-cube-03` and `borg-cube-04` (wrappers in `~/.local/bin/`) and record the result in working memory.
+- After changing `runscaler/`, copy the files to `~/.config/runscaler/` on `borg-cube-03`, rebuild and push the image in the Colima VM, then restart the service. Push does not restart running jobs.
 
 ## End-to-End Evidence Standard
 
@@ -55,10 +49,11 @@
 trips-ci/
 ├── .github/workflows/   # reusable workflows called by every Trips repo
 ├── docs/                # runner and workflow runbooks
-├── launchd/             # com.jai.trips-*-runner*.plist controller agents
-├── scripts/             # runner controllers, base-image provisioning, caller generation
+├── launchd/             # Colima boot job
+├── runscaler/           # runner image and configs
+├── scripts/             # base-image provisioning, caller generation
 ├── templates/           # caller-workflow templates rendered into downstream repos
-└── tests/               # controller and workflow tests
+└── tests/               # provisioning tests
 ```
 
 - `templates/code-review-caller.yaml` is the caller workflow for repos that use the shared Codex PR review; `scripts/generate-caller-workflows.sh` renders it into the target repos you name.
@@ -67,7 +62,7 @@ trips-ci/
 
 - `scripts/generate-caller-workflows.sh [--check|--stdout] <target-dir>...` renders `code-review.yaml` into the named downstream repos. Trips repos do not call it.
 - `scripts/validate-workflows.sh` validates the rendered output.
-- Laptop health check: `launchctl list | grep com.jai.trips`, `tart list`, `limactl list`, and the controller logs under `~/Library/Logs/trips-*-runner/`.
+- Laptop health check: `colima ssh -p ci -- curl -s localhost:18080/healthz` (Linux) and `runner status --config ~/.config/runscaler/tart.toml` (iOS).
 
 ## Owner
 

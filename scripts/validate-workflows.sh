@@ -27,27 +27,12 @@ actionlint "${actionlint_args[@]}" "$repo_root"/.github/workflows/*.yaml "$repo_
 actionlint "${actionlint_args[@]}" "$tmp_dir/.github/workflows"/*.yaml
 actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
-shellcheck "$repo_root/scripts/provision-lima-runner-base.sh"
 zsh -n \
-  "$repo_root/scripts/provision-lima-runner-base.zsh" \
   "$repo_root/scripts/provision-tart-runner-base.zsh" \
-  "$repo_root/scripts/start-trips-linux-lima-runner.zsh" \
-  "$repo_root/scripts/start-trips-tart-runner.zsh" \
-  "$repo_root/scripts/trips-linux-lima-runner-controller.zsh" \
-  "$repo_root/scripts/trips-tart-runner-controller.zsh" \
-  "$repo_root/tests/trips-linux-lima-runner-controller-test.zsh" \
-  "$repo_root/tests/provision-tart-runner-base-test.zsh" \
-  "$repo_root/tests/trips-tart-runner-controller-test.zsh"
-"$repo_root/tests/trips-linux-lima-runner-controller-test.zsh"
+  "$repo_root/tests/provision-tart-runner-base-test.zsh"
 "$repo_root/tests/provision-tart-runner-base-test.zsh"
-"$repo_root/tests/trips-tart-runner-controller-test.zsh"
 plist_files=(
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-a.plist"
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-b.plist"
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-c.plist"
-  "$repo_root/launchd/com.jai.trips-linux-lima-runner-d.plist"
   "$repo_root/launchd/com.jai.trips-colima-ci.plist"
-  "$repo_root/launchd/com.jai.trips-tart-runner.plist"
 )
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "${plist_files[@]}"
