@@ -13,6 +13,8 @@ cpu = 4
 memory = 16384
 runner-dir = "/Users/admin/actions-runner"
 pool-size = 0
+# The host relays DNS through its VPN and stops answering after the VPN changes.
+dns = ["1.1.1.1", "8.8.8.8"]
 
 [[scaleset]]
 url = "https://github.com/jai/trips-frontend"

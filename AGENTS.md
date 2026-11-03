@@ -62,6 +62,7 @@ trips-ci/
 
 - `scripts/generate-caller-workflows.sh [--check|--stdout] <target-dir>...` renders `code-review.yaml` into the named downstream repos. Trips repos do not call it.
 - `scripts/validate-workflows.sh` validates the rendered output.
+- The CI VM uses fixed DNS (1.1.1.1, 8.8.8.8) in `/etc/resolv.conf` and in `~/.colima/ci/colima.yaml`, because Colima's DNS relay through the laptop stops answering after its VPN changes. Without DNS, `runscaler` cannot reach GitHub and every job queues.
 - Laptop health check: `colima ssh -p ci -- curl -s localhost:18080/healthz` (Linux) and `runner status --config ~/.config/runscaler/tart.toml` (iOS).
 
 ## Owner
