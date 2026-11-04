@@ -10,7 +10,7 @@
 
 - Shared GitHub Actions workflows for Trips repositories.
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
-- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). All private Trips CI runs on `runscaler` on Jai's laptop `borg-cube-03`: Linux jobs as containers in the Colima profile `ci`, iOS jobs as Tart VMs cloned from the local image `trips-runner-golden`. `launchd/com.jai.trips-colima-ci.plist` starts the Linux side at login; the iOS side is the launchd service `io.github.ysya.runner`. `scripts/provision-tart-runner-base.zsh` builds a new macOS base.
+- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). `launchd/` starts them on `borg-cube-03`. How to change and check them: `jai/trips` `docs/ci-runners.md`.
 - This repo is public and its own CI runs on GitHub-hosted `ubuntu-latest`.
 
 ## Project Mode (Solo MVP)
@@ -35,7 +35,6 @@
 - Prefer small workflow changes with clear validation.
 - Avoid compatibility indirection unless explicitly requested.
 - Ship quickly, but keep critical gating checks reliable.
-- After changing `runscaler/`, copy the files to `~/.config/runscaler/` on `borg-cube-03`, rebuild and push the image in the Colima VM, then restart the service. Push does not restart running jobs.
 
 ## End-to-End Evidence Standard
 
@@ -62,8 +61,6 @@ trips-ci/
 
 - `scripts/generate-caller-workflows.sh [--check|--stdout] <target-dir>...` renders `code-review.yaml` into the named downstream repos. Trips repos do not call it.
 - `scripts/validate-workflows.sh` validates the rendered output.
-- The CI VM uses fixed DNS (1.1.1.1, 8.8.8.8) in `/etc/resolv.conf` and in `~/.colima/ci/colima.yaml`, because Colima's DNS relay through the laptop stops answering after its VPN changes. Without DNS, `runscaler` cannot reach GitHub and every job queues.
-- Laptop health check: `colima ssh -p ci -- curl -s localhost:18080/healthz` (Linux) and `runner status --config ~/.config/runscaler/tart.toml` (iOS).
 
 ## Owner
 
