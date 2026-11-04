@@ -6,7 +6,7 @@ PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 readonly root=/Users/jai/.local/share/trips-android-host-runner
 readonly job_root="$root/jobs/job-$(date +%s)"
 
-rm -rf "$root"/jobs/job-*
+rm -rf "$root"/jobs/job-*(N)
 mkdir -p "$job_root/tmp" "$job_root/npm" "$job_root/gradle" "$job_root/work"
 cp -R "$root/actions-runner" "$job_root/runner"
 token=$(gh api -X POST repos/jai/trips-frontend/actions/runners/registration-token --jq .token)
