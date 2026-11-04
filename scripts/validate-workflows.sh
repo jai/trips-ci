@@ -29,10 +29,14 @@ actionlint "${actionlint_args[@]}" "$repo_root"/templates/*.yaml
 shellcheck "$repo_root/scripts/generate-caller-workflows.sh" "$repo_root/scripts/validate-workflows.sh"
 zsh -n \
   "$repo_root/scripts/provision-tart-runner-base.zsh" \
+  "$repo_root/scripts/trips-ci-health.zsh" \
+  "$repo_root/tests/trips-ci-health-test.zsh" \
   "$repo_root/tests/provision-tart-runner-base-test.zsh"
 "$repo_root/tests/provision-tart-runner-base-test.zsh"
+"$repo_root/tests/trips-ci-health-test.zsh"
 plist_files=(
   "$repo_root/launchd/com.jai.trips-colima-ci.plist"
+  "$repo_root/launchd/com.jai.trips-ci-health.plist"
 )
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "${plist_files[@]}"
