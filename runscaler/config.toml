@@ -1,6 +1,6 @@
 log-level = "info"
 log-format = "text"
-concurrent = 4
+concurrent = 2
 health-address = "127.0.0.1"
 health-port = 18080
 provider = "docker"
