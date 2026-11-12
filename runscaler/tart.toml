@@ -23,3 +23,11 @@ labels = ["self-hosted", "macOS", "ARM64", "tart", "ios"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
 github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/agent-pager"
+name = "agent-pager-tart"
+labels = ["self-hosted", "macOS", "ARM64", "tart", "agent-pager-tart"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
