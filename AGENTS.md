@@ -10,7 +10,7 @@
 
 - Shared GitHub Actions workflows for Trips repositories.
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
-- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). `launchd/` starts them on `borg-cube-03`. How to change and check them: `jai/trips` `docs/ci-runners.md`.
+- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). `launchd/` starts them on `borg-cube-03`. `config-borg-cube-04.toml`, `tart-borg-cube-04.toml` and `config-mac-mini.toml` are the fallback hosts' configs (suffixed scale-set names, same labels). How to change and check them: `jai/trips` `docs/ci-runners.md`.
 - This repo is public and its own CI runs on GitHub-hosted `ubuntu-latest`.
 
 ## Project Mode (Solo MVP)

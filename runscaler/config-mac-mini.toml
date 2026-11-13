@@ -1,0 +1,80 @@
+log-level = "info"
+log-format = "text"
+concurrent = 2
+health-address = "127.0.0.1"
+health-port = 18080
+provider = "docker"
+runner-image = "localhost:5000/trips-runner:ci"
+runner-group = "default"
+max-runners = 2
+
+[docker]
+socket = "/var/run/docker.sock"
+dind = true
+network = "host"
+shared-volume = ""
+prune = true
+buildx-cleanup = true
+cache-volumes = [
+  "go-mod:/home/runner/go/pkg/mod",
+  "go-build:/home/runner/.cache/go-build",
+  "npm:/home/runner/.npm",
+  "playwright:/home/runner/.cache/ms-playwright",
+  "tool-cache:/home/runner/_work/_tool",
+]
+
+[[scaleset]]
+url = "https://github.com/jai/trips-api"
+name = "trips-api-mini"
+labels = ["trips-api", "self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-frontend"
+name = "trips-frontend-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-email-ingest-worker"
+name = "trips-email-ingest-worker-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips-infra"
+name = "trips-infra-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/trips"
+name = "trips-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/openclaw-prompts"
+name = "openclaw-prompts-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
+
+[[scaleset]]
+url = "https://github.com/jai/tonegate"
+name = "tonegate-mini"
+labels = ["self-hosted", "linux", "arm64", "jai-ci-tonegate"]
+github-app.client-id = "Iv23liE7emigmNvTsn08"
+github-app.installation-id = 150444191
+github-app.private-key-file = "/etc/runner/github-app-private-key.pem"
