@@ -8,10 +8,10 @@ on:
   workflow_call:
     inputs:
       runner_labels:
-        description: JSON array of runner labels for repositories outside the Trips runner pool.
+        description: JSON array of runner labels. Defaults to Ubicloud x64 for Trips.
         type: string
         required: false
-        default: '["self-hosted", "linux", "arm64", "jai-ci"]'
+        default: '["ubicloud-standard-2"]'
       codex_version:
         description: Codex CLI version to install (latest or exact semver)
         type: string

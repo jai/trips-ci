@@ -29,7 +29,7 @@ permissions:
 jobs:
   enable-auto-merge:
     if: ${{ !github.event.pull_request.draft && contains(fromJSON('["dependabot[bot]", "jai-bot-reviewer"]'), github.event.pull_request.user.login) }}
-    runs-on: [self-hosted, linux, arm64, jai-ci]
+    runs-on: ubicloud-standard-2
     steps:
       - name: Enable auto-merge (squash)
         run: |
