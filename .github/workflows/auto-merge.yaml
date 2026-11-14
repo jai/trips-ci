@@ -1,5 +1,6 @@
 # Auto-Merge Workflow
-# Enables auto-merge (squash) on bot PRs (Dependabot, the OpenAPI sync) as soon
+# Enables auto-merge (squash) on bot PRs (Dependabot, the OpenAPI sync, and
+# release-please release PRs, which open as jai) as soon
 # as they're opened. Merge won't happen until the ruleset's required checks pass.
 # People and agents push to main, and the factory merges its own PRs, so other
 # PRs are left alone. Called by downstream repos via workflow_call.
@@ -28,7 +29,11 @@ permissions:
 
 jobs:
   enable-auto-merge:
-    if: ${{ !github.event.pull_request.draft && contains(fromJSON('["dependabot[bot]", "jai-bot-reviewer"]'), github.event.pull_request.user.login) }}
+    if: >-
+      ${{ !github.event.pull_request.draft && (
+        contains(fromJSON('["dependabot[bot]", "jai-bot-reviewer"]'), github.event.pull_request.user.login) ||
+        (github.event.pull_request.user.login == 'jai' && startsWith(github.event.pull_request.head.ref, 'release-please--'))
+      ) }}
     runs-on: ubicloud-standard-2
     steps:
       - name: Enable auto-merge (squash)
