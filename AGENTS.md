@@ -1,10 +1,10 @@
 > [!IMPORTANT]
-> **Platform operational source of truth:** the central `jai/trips` repo owns current platform status and the operator manual. Read its `AGENTS.md` and `OPERATOR_MANUAL.md` before deploy or incident work; do not duplicate platform status here.
+> **Platform operational source of truth:** the central `viators-net/trips` repo owns current platform status and the operator manual. Read its `AGENTS.md` and `OPERATOR_MANUAL.md` before deploy or incident work; do not duplicate platform status here.
 
 > [!TIP]
-> **Start here for platform questions** (all owned by `jai/trips`): where CI runs (Jai's laptop `borg-cube-03`, ephemeral runners) → [`docs/ci-runners.md`](https://github.com/jai/trips/blob/main/docs/ci-runners.md); iOS build / TestFlight → [`docs/ios-release.md`](https://github.com/jai/trips/blob/main/docs/ios-release.md); feature backlog and what is in flight → [`docs/FEATURE_PIPELINE.md`](https://github.com/jai/trips/blob/main/docs/FEATURE_PIPELINE.md). If this file disagrees with those, the umbrella wins; fix this file.
+> **Start here for platform questions** (all owned by `viators-net/trips`): where CI runs (Jai's laptop `borg-cube-03`, ephemeral runners) → [`docs/ci-runners.md`](https://github.com/viators-net/trips/blob/main/docs/ci-runners.md); iOS build / TestFlight → [`docs/ios-release.md`](https://github.com/viators-net/trips/blob/main/docs/ios-release.md); feature backlog and what is in flight → [`docs/FEATURE_PIPELINE.md`](https://github.com/viators-net/trips/blob/main/docs/FEATURE_PIPELINE.md). If this file disagrees with those, the umbrella wins; fix this file.
 
-# AGENTS.md — Trips CI (`jai/trips-ci`)
+# AGENTS.md — Trips CI (`viators-net/trips-ci`)
 
 **CI rules:** before you add or change a workflow, or build, test, run a simulator or drive a desktop on one of
 Jai's Macs, read [RULES.md in jai/ci](https://github.com/jai/ci/blob/main/RULES.md).
@@ -33,14 +33,14 @@ Jai's Macs, read [RULES.md in jai/ci](https://github.com/jai/ci/blob/main/RULES.
 
 - Shared GitHub Actions workflows for Trips repositories.
 - Workflows: `code-review*.yaml` (Codex PR review orchestration, called by non-Trips repos; Trips repos run `codex review` locally before each push), `auto-merge.yaml` (enables auto-merge on Dependabot and OpenAPI-sync PRs), `coverage-octocov.yml`, and `validate-workflows.yaml` (this repo's own CI).
-- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). `launchd/` starts them on `borg-cube-03`. `config-borg-cube-04.toml`, `tart-borg-cube-04.toml` and `config-mac-mini.toml` are the fallback hosts' configs (suffixed scale-set names, same labels). How to change and check them: `jai/trips` `docs/ci-runners.md`.
+- `runscaler/` holds the Linux image and config (`Dockerfile`, `config.toml`) and the iOS config (`tart.toml`). `launchd/` starts them on `borg-cube-03`. `config-borg-cube-04.toml`, `tart-borg-cube-04.toml` and `config-mac-mini.toml` are the fallback hosts' configs (suffixed scale-set names, same labels). How to change and check them: `viators-net/trips` `docs/ci-runners.md`.
 - This repo is public and its own CI runs on GitHub-hosted `ubuntu-latest`.
 
 ## Project Mode (Solo MVP)
 
 - One-person side project.
 - Single operator and single user: Jai.
-- Features are built from Jai's specs: the linked `jai/trips` issue body is the spec. Build what it says and do not invent scope; ask on the issue when it is ambiguous.
+- Features are built from Jai's specs: the linked `viators-net/trips` issue body is the spec. Build what it says and do not invent scope; ask on the issue when it is ambiguous.
 - Optimize CI changes for speed and reliability.
 - Breaking workflow/interface changes are acceptable when they unblock delivery.
 - Backward compatibility is not required during MVP.
@@ -61,7 +61,7 @@ Jai's Macs, read [RULES.md in jai/ci](https://github.com/jai/ci/blob/main/RULES.
 
 ## End-to-End Evidence Standard
 
-- Follow the central `jai/trips` `AGENTS.md` end-to-end evidence standard.
+- Follow the central `viators-net/trips` `AGENTS.md` end-to-end evidence standard.
 - Workflow changes must preserve fail-fast CI behavior for production-like E2E checks and must not turn cross-repo feature evidence into sliced-only coverage.
 - For email attachments, the expected CI evidence is a raw RFC822 email with an actual retained attachment flowing through worker ingest, API persistence/download endpoints, frontend UI visibility, and a successful attachment download.
 

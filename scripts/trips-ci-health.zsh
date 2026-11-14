@@ -7,7 +7,7 @@ readonly state_directory="${HOME}/.local/state/trips-ci-health"
 readonly failing_since_file="${state_directory}/failing-since"
 readonly alert_id_file="${state_directory}/alert-id"
 readonly page_after_seconds=3600
-readonly manual_url="https://github.com/jai/trips/blob/main/docs/ci-runners.md"
+readonly manual_url="https://github.com/viators-net/trips/blob/main/docs/ci-runners.md"
 
 all_ready() {
   jq -e '.status == "ok" and ([.scale_sets[].ready] | all)' >/dev/null

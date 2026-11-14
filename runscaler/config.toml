@@ -24,7 +24,7 @@ cache-volumes = [
 ]
 
 [[scaleset]]
-url = "https://github.com/jai/trips-api"
+url = "https://github.com/viators-net/trips-api"
 name = "trips-api"
 labels = ["trips-api", "self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
@@ -32,7 +32,7 @@ github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 
 [[scaleset]]
-url = "https://github.com/jai/trips-frontend"
+url = "https://github.com/viators-net/trips-frontend"
 name = "trips-frontend"
 labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
@@ -40,7 +40,7 @@ github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 
 [[scaleset]]
-url = "https://github.com/jai/trips-email-ingest-worker"
+url = "https://github.com/viators-net/trips-email-ingest-worker"
 name = "trips-email-ingest-worker"
 labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
@@ -48,7 +48,7 @@ github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 
 [[scaleset]]
-url = "https://github.com/jai/trips-infra"
+url = "https://github.com/viators-net/trips-infra"
 name = "trips-infra"
 labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
@@ -56,7 +56,7 @@ github-app.installation-id = 150444191
 github-app.private-key-file = "/Users/jai/.config/trips-tart-runner/github-app-private-key.pem"
 
 [[scaleset]]
-url = "https://github.com/jai/trips"
+url = "https://github.com/viators-net/trips"
 name = "trips"
 labels = ["self-hosted", "linux", "arm64", "jai-ci", "jai-ci-delivery", "jai-ci-deploy", "jai-ci-native"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
