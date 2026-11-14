@@ -6,6 +6,9 @@
 
 # AGENTS.md — Trips CI (`jai/trips-ci`)
 
+**CI rules:** before you add or change a workflow, or build, test, run a simulator or drive a desktop on one of
+Jai's Macs, read [RULES.md in jai/ci](https://github.com/jai/ci/blob/main/RULES.md).
+
 ## Repo Identity
 
 - Shared GitHub Actions workflows for Trips repositories.
