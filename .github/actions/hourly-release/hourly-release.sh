@@ -7,9 +7,15 @@ set -euo pipefail
 
 repo="$GITHUB_REPOSITORY"
 
+# "completed success" when any push run for the commit passed; otherwise the newest run that was not cancelled (a
+# duplicate run someone cancelled says nothing about the commit).
 ci_result() {
   gh api "repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=$1&event=push&per_page=20" \
-    --jq '.workflow_runs | sort_by(.created_at) | last | "\(.status) \(.conclusion)"'
+    --jq '.workflow_runs
+          | if any(.[]; .conclusion == "success") then "completed success"
+            else (map(select(.conclusion != "cancelled")) | sort_by(.created_at) | last
+                  | if . == null then "" else "\(.status) \(.conclusion)" end)
+            end'
 }
 
 ready() {
