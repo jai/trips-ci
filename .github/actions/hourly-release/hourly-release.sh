@@ -39,9 +39,14 @@ readonly mutation='mutation($input: CreateCommitOnBranchInput!) {
 
 land() {
   local branch number head parent work temp commit state
-  read -r number branch < <(gh pr list --repo "$repo" --state open --base main --label 'autorelease: pending' \
-    --json number,headRefName --jq '.[0] | "\(.number) \(.headRefName)"')
-  if [[ -z "${branch:-}" || "$branch" == null ]]; then
+  number=$(jq -r '.number // empty' <<<"${PR:-}")
+  branch=$(jq -r '.headBranchName // empty' <<<"${PR:-}")
+  if [[ -z "$number" ]]; then
+    # release-please reports only a pull request it changed; an unchanged open one is still ours to land.
+    read -r number branch < <(gh api "repos/${repo}/pulls?state=open&base=main&per_page=50" \
+      --jq '[.[] | select(any(.labels[]; .name == "autorelease: pending"))][0] | "\(.number // "") \(.head.ref // "")"')
+  fi
+  if [[ -z "${number:-}" ]]; then
     echo "release-please found nothing to release since the last tag."
     return
   fi

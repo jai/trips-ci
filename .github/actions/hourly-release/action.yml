@@ -56,6 +56,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         SHA: ${{ steps.decide.outputs.sha }}
+        # The pull request release-please just opened or updated; GitHub's search lags behind it.
+        PR: ${{ steps.prepare.outputs.pr }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" land'
 
     # Also tags a release commit an earlier run landed but did not get to tag.
