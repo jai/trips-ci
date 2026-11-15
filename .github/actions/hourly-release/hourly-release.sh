@@ -38,7 +38,7 @@ readonly mutation='mutation($input: CreateCommitOnBranchInput!) {
 }'
 
 land() {
-  local branch number head parent work temp commit state
+  local branch number head parent files work temp commit state
   number=$(jq -r '.number // empty' <<<"${PR:-}")
   branch=$(jq -r '.headBranchName // empty' <<<"${PR:-}")
   if [[ -z "$number" ]]; then
@@ -54,8 +54,14 @@ land() {
   git fetch --quiet origin main "$branch"
   head=$(git rev-parse "origin/${branch}")
   parent=$(git rev-parse "${head}^")
-  if [[ "$parent" != "$SHA" ]]; then
-    echo "::warning::Release branch ${branch} is built on ${parent}, not on the tested ${SHA}; main moved. Next run."
+  # release-please leaves its branch alone when the release notes did not change (a ci: or docs: push), so the branch
+  # can sit on an older main. Its files (version, changelog, manifest) carry over to the tested commit only when
+  # nothing between the two touched them.
+  files=$(git diff --name-only "$parent" "$head")
+  # shellcheck disable=SC2086 # one path per word
+  if [[ "$parent" != "$SHA" ]] && ! git diff --quiet "$parent" "$SHA" -- $files; then
+    echo "::warning::${branch} is built on ${parent}; main changed its files since. release-please rebuilds it next run."
+    gh api -X DELETE "repos/${repo}/git/refs/heads/${branch}" >/dev/null || true
     return
   fi
 
@@ -68,11 +74,11 @@ land() {
   trap "gh api -X DELETE 'repos/${repo}/git/refs/heads/${temp}' >/dev/null 2>&1 || true; rm -rf '${work}'" EXIT
   gh api "repos/${repo}/git/refs" -f "ref=refs/heads/${temp}" -f "sha=${SHA}" >/dev/null
 
-  git diff --name-only --diff-filter=d "$SHA" "$head" | while IFS= read -r path; do
+  git diff --name-only --diff-filter=d "$parent" "$head" | while IFS= read -r path; do
     git show "${head}:${path}" | base64 -w0 >"${work}/contents"
     jq -n --arg path "$path" --rawfile contents "${work}/contents" '{path: $path, contents: $contents}'
   done >"${work}/additions.json"
-  git diff --name-only --diff-filter=D "$SHA" "$head" | jq -R '{path: .}' >"${work}/deletions.json"
+  git diff --name-only --diff-filter=D "$parent" "$head" | jq -R '{path: .}' >"${work}/deletions.json"
 
   jq -n \
     --arg query "$mutation" \
@@ -98,6 +104,7 @@ land() {
     return
   fi
   echo "main is now the release commit ${commit}."
+  echo "landed=true" >>"$GITHUB_OUTPUT"
 
   # GitHub marks the pull request merged once its head is on main; release-please tags only merged ones.
   for _ in $(seq 1 30); do
