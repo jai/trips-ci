@@ -1,0 +1,69 @@
+name: Hourly release
+description: >-
+  Release main once its CI passed, at most once an hour. release-please writes the release commit, which lands on main
+  as a GitHub-signed fast-forward of the tested commit, and then tags it and publishes the GitHub Release. No release
+  pull request waits for a merge.
+inputs:
+  token:
+    description: Token that can write main and the release branch; its GitHub Release starts the deploy workflows.
+    required: true
+  ci-workflow:
+    description: File name of the workflow that tests every push to main, for example ci.yaml.
+    required: true
+  tag-prefix:
+    description: Release tag prefix, for example frontend-v.
+    required: true
+  config-file:
+    description: release-please config file.
+    default: release-please-config.json
+  manifest-file:
+    description: release-please manifest file.
+    default: .release-please-manifest.json
+outputs:
+  release_created:
+    description: "'true' when this run published a release."
+    value: ${{ steps.publish.outputs.release_created }}
+  tag_name:
+    description: The tag this run published.
+    value: ${{ steps.publish.outputs.tag_name }}
+  html_url:
+    description: The GitHub Release this run published.
+    value: ${{ steps.publish.outputs.html_url }}
+runs:
+  using: composite
+  steps:
+    - id: decide
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+      run: '"$GITHUB_ACTION_PATH/hourly-release.sh" decide'
+
+    - id: prepare
+      if: steps.decide.outputs.sha != ''
+      uses: googleapis/release-please-action@v4
+      with:
+        token: ${{ inputs.token }}
+        config-file: ${{ inputs.config-file }}
+        manifest-file: ${{ inputs.manifest-file }}
+        target-branch: main
+        skip-github-release: true
+
+    - id: land
+      if: steps.decide.outputs.sha != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SHA: ${{ steps.decide.outputs.sha }}
+      run: '"$GITHUB_ACTION_PATH/hourly-release.sh" land'
+
+    # Also tags a release commit an earlier run landed but did not get to tag.
+    - id: publish
+      uses: googleapis/release-please-action@v4
+      with:
+        token: ${{ inputs.token }}
+        config-file: ${{ inputs.config-file }}
+        manifest-file: ${{ inputs.manifest-file }}
+        target-branch: main
+        skip-github-pull-request: true
