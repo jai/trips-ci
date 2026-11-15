@@ -40,15 +40,18 @@ runs:
         CI_WORKFLOW: ${{ inputs.ci-workflow }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" ready'
 
+    # Tags over git and creates the GitHub Release with no target commit: on 2026-11-15 GitHub's REST API answered 404 to
+    # any release or ref that named an older commit, so release-please's own tagging failed.
     - id: publish
       if: steps.ready.outputs.state == 'ready'
-      uses: googleapis/release-please-action@v4
-      with:
-        token: ${{ inputs.token }}
-        config-file: ${{ inputs.config-file }}
-        manifest-file: ${{ inputs.manifest-file }}
-        target-branch: main
-        skip-github-pull-request: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        SHA: ${{ steps.ready.outputs.sha }}
+        PR_NUMBER: ${{ steps.ready.outputs.number }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        MANIFEST: ${{ inputs.manifest-file }}
+      run: '"$GITHUB_ACTION_PATH/hourly-release.sh" publish'
 
     - id: decide
       if: steps.ready.outputs.state == 'none'

@@ -31,7 +31,7 @@ ready() {
   case "$ci" in
     "completed success")
       echo "Release commit ${sha} (#${number}) passed ${CI_WORKFLOW}; tagging it."
-      echo "state=ready" >>"$GITHUB_OUTPUT" ;;
+      { echo "state=ready"; echo "sha=${sha}"; echo "number=${number}"; } >>"$GITHUB_OUTPUT" ;;
     completed\ *)
       # release-please stops tracking the pull request, so the next release PR can open; that version is skipped.
       echo "::warning::Release commit ${sha} (#${number}) did not pass ${CI_WORKFLOW} (${ci}); skipping that version."
@@ -42,6 +42,31 @@ ready() {
       echo "Release commit ${sha} (#${number}) waits for its ${CI_WORKFLOW} run (${ci:-not started})."
       echo "state=waiting" >>"$GITHUB_OUTPUT" ;;
   esac
+}
+
+# Tag the release commit and publish its GitHub Release, as release-please would: notes are this version's CHANGELOG.md
+# section, the title "<component>: v<version>", and the pull request moves to "autorelease: tagged".
+publish() {
+  local version tag component notes url
+  git fetch --quiet origin main
+  version=$(git show "${SHA}:${MANIFEST}" | jq -r '."."')
+  tag="${TAG_PREFIX}${version}"
+  component="${TAG_PREFIX%-v}"
+  notes=$(mktemp)
+  git show "${SHA}:CHANGELOG.md" | awk '/^## /{n++} n==1' >"$notes"
+
+  if ! gh api "repos/${repo}/git/refs/tags/${tag}" >/dev/null 2>&1; then
+    git push --quiet origin "${SHA}:refs/tags/${tag}"
+  fi
+  if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+    echo "${tag} is already published."
+  else
+    gh release create "$tag" --repo "$repo" --verify-tag --title "${component}: v${version}" --notes-file "$notes" --latest
+  fi
+  gh api -X DELETE "repos/${repo}/issues/${PR_NUMBER}/labels/autorelease:%20pending" >/dev/null 2>&1 || true
+  gh api "repos/${repo}/issues/${PR_NUMBER}/labels" -f "labels[]=autorelease: tagged" >/dev/null
+  url=$(gh release view "$tag" --repo "$repo" --json url --jq .url)
+  { echo "release_created=true"; echo "tag_name=${tag}"; echo "html_url=${url}"; } >>"$GITHUB_OUTPUT"
 }
 
 decide() {
