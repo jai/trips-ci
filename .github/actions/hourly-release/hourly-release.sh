@@ -38,8 +38,20 @@ ready() {
       gh api -X DELETE "repos/${repo}/issues/${number}/labels/autorelease:%20pending" >/dev/null
       gh api "repos/${repo}/issues/${number}/labels" -f "labels[]=autorelease: failed" >/dev/null
       echo "state=none" >>"$GITHUB_OUTPUT" ;;
+    "")
+      # Every run for it was cancelled (GitHub drops older pending runs in a concurrency group): run it again.
+      local cancelled
+      cancelled=$(gh api "repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${sha}&event=push&per_page=20" \
+        --jq '[.workflow_runs[] | select(.conclusion == "cancelled")] | sort_by(.created_at) | last | .id // empty')
+      if [[ -n "$cancelled" ]]; then
+        gh api -X POST "repos/${repo}/actions/runs/${cancelled}/rerun" >/dev/null
+        echo "Release commit ${sha} (#${number}) had only cancelled ${CI_WORKFLOW} runs; re-ran ${cancelled}."
+      else
+        echo "Release commit ${sha} (#${number}) waits for its ${CI_WORKFLOW} run (not started)."
+      fi
+      echo "state=waiting" >>"$GITHUB_OUTPUT" ;;
     *)
-      echo "Release commit ${sha} (#${number}) waits for its ${CI_WORKFLOW} run (${ci:-not started})."
+      echo "Release commit ${sha} (#${number}) waits for its ${CI_WORKFLOW} run (${ci})."
       echo "state=waiting" >>"$GITHUB_OUTPUT" ;;
   esac
 }
