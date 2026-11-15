@@ -63,7 +63,9 @@ land() {
   # on a temporary branch at the tested commit.
   work=$(mktemp -d)
   temp="sign-release/${head}"
-  trap 'gh api -X DELETE "repos/${repo}/git/refs/heads/${temp}" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+  # Expanded now: temp and work are locals, gone by the time the EXIT trap runs under set -u.
+  # shellcheck disable=SC2064
+  trap "gh api -X DELETE 'repos/${repo}/git/refs/heads/${temp}' >/dev/null 2>&1 || true; rm -rf '${work}'" EXIT
   gh api "repos/${repo}/git/refs" -f "ref=refs/heads/${temp}" -f "sha=${SHA}" >/dev/null
 
   git diff --name-only --diff-filter=d "$SHA" "$head" | while IFS= read -r path; do
