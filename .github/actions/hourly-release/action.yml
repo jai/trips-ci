@@ -1,8 +1,8 @@
 name: Hourly release
 description: >-
-  Release main once its CI passed, at most once an hour. release-please writes the release commit, which lands on main
-  as a GitHub-signed fast-forward of the tested commit, and then tags it and publishes the GitHub Release. No release
-  pull request waits for a merge.
+  At most once an hour, release-please writes the release commit for everything on main, and it lands on main's head
+  as a GitHub-signed fast-forward, with no release pull request to merge. A later run tags it and publishes the GitHub
+  Release once that commit's own CI run passed, so commits pushed after it never hold the release back.
 inputs:
   token:
     description: Token that can write main and the release branch; its GitHub Release starts the deploy workflows.
@@ -22,19 +22,26 @@ inputs:
 outputs:
   release_created:
     description: "'true' when this run published a release."
-    value: ${{ steps.pending.outputs.release_created || steps.published.outputs.release_created }}
+    value: ${{ steps.publish.outputs.release_created }}
   tag_name:
     description: The tag this run published.
-    value: ${{ steps.pending.outputs.tag_name || steps.published.outputs.tag_name }}
+    value: ${{ steps.publish.outputs.tag_name }}
   html_url:
     description: The GitHub Release this run published.
-    value: ${{ steps.pending.outputs.html_url || steps.published.outputs.html_url }}
+    value: ${{ steps.publish.outputs.html_url }}
 runs:
   using: composite
   steps:
-    # First tag a release commit an earlier run landed but did not get to tag: release-please refuses to open a new
-    # release PR while a merged one is untagged.
-    - id: pending
+    # A release commit on main waits for its own CI run: passed, tag it; failed, skip that version; running, wait.
+    - id: ready
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CI_WORKFLOW: ${{ inputs.ci-workflow }}
+      run: '"$GITHUB_ACTION_PATH/hourly-release.sh" ready'
+
+    - id: publish
+      if: steps.ready.outputs.state == 'ready'
       uses: googleapis/release-please-action@v4
       with:
         token: ${{ inputs.token }}
@@ -44,16 +51,15 @@ runs:
         skip-github-pull-request: true
 
     - id: decide
-      if: steps.pending.outputs.release_created != 'true'
+      if: steps.ready.outputs.state == 'none'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
-        CI_WORKFLOW: ${{ inputs.ci-workflow }}
         TAG_PREFIX: ${{ inputs.tag-prefix }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" decide'
 
     - id: prepare
-      if: steps.decide.outputs.sha != ''
+      if: steps.decide.outputs.go == 'true'
       uses: googleapis/release-please-action@v4
       with:
         token: ${{ inputs.token }}
@@ -63,21 +69,10 @@ runs:
         skip-github-release: true
 
     - id: land
-      if: steps.decide.outputs.sha != ''
+      if: steps.decide.outputs.go == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
-        SHA: ${{ steps.decide.outputs.sha }}
         # The pull request release-please just opened or updated; GitHub's search lags behind it.
         PR: ${{ steps.prepare.outputs.pr }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" land'
-
-    - id: published
-      if: steps.land.outputs.landed == 'true'
-      uses: googleapis/release-please-action@v4
-      with:
-        token: ${{ inputs.token }}
-        config-file: ${{ inputs.config-file }}
-        manifest-file: ${{ inputs.manifest-file }}
-        target-branch: main
-        skip-github-pull-request: true
