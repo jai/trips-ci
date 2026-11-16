@@ -11,7 +11,7 @@ inputs:
     description: File name of the workflow that tests every push to main, for example ci.yaml.
     required: true
   tag-prefix:
-    description: Release tag prefix, for example frontend-v.
+    description: Release tag prefix, for example frontend-v, or v for a repo with one component.
     required: true
   config-file:
     description: release-please config file.

@@ -57,13 +57,14 @@ ready() {
 }
 
 # Tag the release commit and publish its GitHub Release, as release-please would: notes are this version's CHANGELOG.md
-# section, the title "<component>: v<version>", and the pull request moves to "autorelease: tagged".
+# section, the title "<component>: v<version>" (or the tag, for a bare v prefix), and the pull request moves to "autorelease: tagged".
 publish() {
-  local version tag component notes url
+  local version tag title notes url
   git fetch --quiet origin main
   version=$(git show "${SHA}:${MANIFEST}" | jq -r '."."')
   tag="${TAG_PREFIX}${version}"
-  component="${TAG_PREFIX%-v}"
+  # "frontend-v" names its component in the title ("frontend: v0.84.2"); a bare "v" prefix titles the release by its tag.
+  if [[ "$TAG_PREFIX" == *-v ]]; then title="${TAG_PREFIX%-v}: v${version}"; else title="$tag"; fi
   notes=$(mktemp)
   git show "${SHA}:CHANGELOG.md" | awk '/^## /{n++} n==1' >"$notes"
 
@@ -73,7 +74,7 @@ publish() {
   if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
     echo "${tag} is already published."
   else
-    gh release create "$tag" --repo "$repo" --verify-tag --title "${component}: v${version}" --notes-file "$notes" --latest
+    gh release create "$tag" --repo "$repo" --verify-tag --title "$title" --notes-file "$notes" --latest
   fi
   gh api -X DELETE "repos/${repo}/issues/${PR_NUMBER}/labels/autorelease:%20pending" >/dev/null 2>&1 || true
   gh api "repos/${repo}/issues/${PR_NUMBER}/labels" -f "labels[]=autorelease: tagged" >/dev/null
