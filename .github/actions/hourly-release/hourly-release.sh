@@ -7,15 +7,28 @@ set -euo pipefail
 
 repo="$GITHUB_REPOSITORY"
 
-# "completed success" when any push run for the commit passed; otherwise the newest run that was not cancelled (a
-# duplicate run someone cancelled says nothing about the commit).
+# "completed success" when any push run for the commit passed, or when the newest passing push run on main is on a
+# later commit that holds it: that run tested the release commit's files too, and on a busy main a newer push keeps
+# replacing the release commit's own waiting run (FeedbackKit 0.6.1, 2026-11-16). Otherwise the newest run that was
+# not cancelled (a duplicate run someone cancelled says nothing about the commit).
 ci_result() {
-  gh api "repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=$1&event=push&per_page=20" \
+  local own later
+  own=$(gh api "repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=$1&event=push&per_page=20" \
     --jq '.workflow_runs
           | if any(.[]; .conclusion == "success") then "completed success"
             else (map(select(.conclusion != "cancelled")) | sort_by(.created_at) | last
                   | if . == null then "" else "\(.status) \(.conclusion)" end)
-            end'
+            end')
+  if [[ "$own" != "completed success" ]]; then
+    later=$(gh api "repos/${repo}/actions/workflows/${CI_WORKFLOW}/runs?branch=main&event=push&status=success&per_page=1" \
+      --jq '.workflow_runs[0].head_sha // empty')
+    if [[ -n "$later" && "$later" != "$1" ]] &&
+      [[ $(gh api "repos/${repo}/compare/$1...${later}" --jq .status) == ahead ]]; then
+      echo "Release commit $1 holds in ${later}, whose ${CI_WORKFLOW} passed." >&2
+      own="completed success"
+    fi
+  fi
+  echo "$own"
 }
 
 ready() {
