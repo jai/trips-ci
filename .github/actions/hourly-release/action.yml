@@ -8,11 +8,19 @@ inputs:
     description: Token that can write main and the release branch; its GitHub Release starts the deploy workflows.
     required: true
   ci-workflow:
-    description: File name of the workflow that tests every push to main, for example ci.yaml.
-    required: true
+    description: File name of the workflow that tests every push to main, for example ci.yaml (one component).
+    default: ""
   tag-prefix:
     description: Release tag prefix, for example frontend-v, or v for a repo with one component.
-    required: true
+    default: ""
+  components:
+    description: >-
+      Several components, as JSON keyed by manifest path, in place of ci-workflow and tag-prefix:
+      {"ios": {"tag-prefix": "ios-v", "statuses": ["ui-works/iphone"], "latest": true},
+      ".": {"tag-prefix": "worker-v", "ci-workflows": ["worker-ci.yml"]}}. A release commit tags each component whose
+      version it changed once that component's workflows (push runs) and commit statuses passed on it, or on a later
+      commit on main that holds it; the others wait or are skipped.
+    default: ""
   config-file:
     description: release-please config file.
     default: release-please-config.json
@@ -24,8 +32,11 @@ outputs:
     description: "'true' when this run published a release."
     value: ${{ steps.publish.outputs.release_created }}
   tag_name:
-    description: The tag this run published.
+    description: The tag this run published (the last one, with several components).
     value: ${{ steps.publish.outputs.tag_name }}
+  tags:
+    description: Every tag this run published, separated by spaces.
+    value: ${{ steps.publish.outputs.tags }}
   html_url:
     description: The GitHub Release this run published.
     value: ${{ steps.publish.outputs.html_url }}
@@ -38,6 +49,9 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        COMPONENTS: ${{ inputs.components }}
+        MANIFEST: ${{ inputs.manifest-file }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" ready'
 
     # Tags over git and creates the GitHub Release with no target commit: on 2026-11-15 GitHub's REST API answered 404 to
@@ -49,8 +63,12 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         SHA: ${{ steps.ready.outputs.sha }}
         PR_NUMBER: ${{ steps.ready.outputs.number }}
+        READY: ${{ steps.ready.outputs.components }}
+        FINAL: ${{ steps.ready.outputs.final }}
         TAG_PREFIX: ${{ inputs.tag-prefix }}
+        COMPONENTS: ${{ inputs.components }}
         MANIFEST: ${{ inputs.manifest-file }}
+        CONFIG_FILE: ${{ inputs.config-file }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" publish'
 
     - id: decide
@@ -59,6 +77,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         TAG_PREFIX: ${{ inputs.tag-prefix }}
+        COMPONENTS: ${{ inputs.components }}
       run: '"$GITHUB_ACTION_PATH/hourly-release.sh" decide'
 
     - id: prepare
