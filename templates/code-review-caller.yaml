@@ -22,7 +22,7 @@ concurrency:
 jobs:
   codex-review:
     name: Codex review router
-    uses: jai/trips-ci/.github/workflows/code-review.yaml@main
+    uses: viators-net/trips-ci/.github/workflows/code-review.yaml@main
     secrets:
       CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
       CODEX_REVIEW_GH_TOKEN: ${{ secrets.CODEX_REVIEW_GH_TOKEN }}

@@ -1,6 +1,6 @@
 # Review Workflow Validation Matrix
 
-> Ref: [Issue #54](https://github.com/jai/trips-ci/issues/54) · [PR #55](https://github.com/jai/trips-ci/pull/55)
+> Ref: [Issue #54](https://github.com/viators-net/trips-ci/issues/54) · [PR #55](https://github.com/viators-net/trips-ci/pull/55)
 >
 > Purpose: executable use-case matrix for validating CI-owned review decision orchestration.
 
@@ -51,7 +51,7 @@ Parser rules:
 
 ```bash
 # Variables
-REPO="jai/trips-frontend"  # or test repo
+REPO="viators-net/trips-frontend"  # or test repo
 PR_NUMBER=<test-pr>
 
 # 1. Trigger review
@@ -105,7 +105,7 @@ gh run view "$RUN_ID" --repo "$REPO" --json jobs \
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<draft-test-pr>
 
 # Pre-check: PR is draft
@@ -147,7 +147,7 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json isDraft -q '.isDraft'
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<test-pr>
 
 # Trigger review
@@ -197,7 +197,7 @@ gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<test-pr-with-unresolved-thread>
 
 # Setup: ensure at least 1 unresolved review thread exists
@@ -252,7 +252,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep -c "DECISION=APPROVE requ
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<test-pr>
 
 # Scenario: Codex ran but didn't post marker
@@ -370,7 +370,7 @@ BLOCKER=Merge conflict
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<test-pr>
 
 # 1. Post conversational @codex comment
@@ -417,7 +417,7 @@ gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 PR_NUMBER=<test-pr>
 
 # Trigger
@@ -448,7 +448,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log 2>&1 | grep "please focus on error ha
 #### Validation Playbook
 
 ```bash
-REPO="jai/trips-frontend"
+REPO="viators-net/trips-frontend"
 
 # Test "opened": create a new PR
 gh pr create --repo "$REPO" --title "test: validation UC-11" --body "test PR" --head test-branch
@@ -649,7 +649,7 @@ Legend: ✅ happy path · ❌ negative/failure path · 🔒 safety constraint ·
 
 ## Test Repo Setup
 
-All runtime tests should target `jai/trips-frontend` (or another caller repo that uses `code-review.yaml` calling the reusable workflow).
+All runtime tests should target `viators-net/trips-frontend` (or another caller repo that uses `code-review.yaml` calling the reusable workflow).
 
 For negative-path tests (UC-04 through UC-08), manual marker injection may be needed:
 ```bash

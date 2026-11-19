@@ -17,7 +17,7 @@ pool-size = 0
 dns = ["1.1.1.1", "8.8.8.8"]
 
 [[scaleset]]
-url = "https://github.com/jai/trips-frontend"
+url = "https://github.com/viators-net/trips-frontend"
 name = "trips-frontend-ios-borg04"
 labels = ["self-hosted", "macOS", "ARM64", "tart", "ios"]
 github-app.client-id = "Iv23liE7emigmNvTsn08"
