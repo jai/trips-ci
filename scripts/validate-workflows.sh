@@ -20,7 +20,7 @@ mkdir -p "$tmp_dir/.github/workflows"
 
 actionlint_args=(
   -shellcheck=
-  -ignore 'label "jai-ci" is unknown'
+  -ignore 'label "zoomies" is unknown'
   -ignore 'label "ubicloud-standard-[0-9]+" is unknown'
 )
 
